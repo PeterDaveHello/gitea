@@ -1,0 +1,179 @@
+// Copyright 2021 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
+package charset
+
+import (
+	"html/template"
+	"strings"
+	"testing"
+
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/test"
+	"gitea.dev/modules/translation"
+
+	"github.com/stretchr/testify/assert"
+)
+
+type escapeControlTest struct {
+	name   string
+	text   string
+	status EscapeStatus
+	result string
+}
+
+var escapeControlTests = []escapeControlTest{
+	{
+		name: "<empty>",
+	},
+	{
+		name:   "single line western",
+		text:   "single line western",
+		result: "single line western",
+		status: EscapeStatus{},
+	},
+	{
+		name:   "multi line western",
+		text:   "single line western\nmulti line western\n",
+		result: "single line western\nmulti line western\n",
+		status: EscapeStatus{},
+	},
+	{
+		name:   "multi line western non-breaking space",
+		text:   "single line western\nmulti line western\n",
+		result: `single line<span class="escaped-code-point" data-escaped="[U+00A0]"><span class="char"> </span></span>western` + "\n" + `multi line<span class="escaped-code-point" data-escaped="[U+00A0]"><span class="char"> </span></span>western` + "\n",
+		status: EscapeStatus{Escaped: true, HasInvisible: true},
+	},
+	{
+		name:   "mixed scripts: western + japanese",
+		text:   "日属秘ぞしちゅ。Then some western.",
+		result: "日属秘ぞしちゅ。Then some western.",
+		status: EscapeStatus{},
+	},
+	{
+		name:   "japanese",
+		text:   "日属秘ぞしちゅ。",
+		result: "日属秘ぞしちゅ。",
+		status: EscapeStatus{},
+	},
+	{
+		name:   "hebrew", // old test was wrong, such text shouldn't be escaped
+		text:   "עד תקופת יוון העתיקה היה העיסוק במתמטיקה תכליתי בלבד: היא שימשה כאוסף של נוסחאות לחישוב קרקע, אוכלוסין וכו'. פריצת הדרך של היוונים, פרט לתרומותיהם הגדולות לידע המתמטי, הייתה בלימוד המתמטיקה כשלעצמה, מתוקף ערכה הרוחני. יחסם של חלק מהיוונים הקדמונים למתמטיקה היה דתי - למשל, הכת שאסף סביבו פיתגורס האמינה כי המתמטיקה היא הבסיס לכל הדברים. היוונים נחשבים ליוצרי מושג ההוכחה המתמטית, וכן לראשונים שעסקו במתמטיקה לשם עצמה, כלומר כתחום מחקרי עיוני ומופשט ולא רק כעזר שימושי. עם זאת, לצדה",
+		result: "עד תקופת יוון העתיקה היה העיסוק במתמטיקה תכליתי בלבד: היא שימשה כאוסף של נוסחאות לחישוב קרקע, אוכלוסין וכו'. פריצת הדרך של היוונים, פרט לתרומותיהם הגדולות לידע המתמטי, הייתה בלימוד המתמטיקה כשלעצמה, מתוקף ערכה הרוחני. יחסם של חלק מהיוונים הקדמונים למתמטיקה היה דתי - למשל, הכת שאסף סביבו פיתגורס האמינה כי המתמטיקה היא הבסיס לכל הדברים. היוונים נחשבים ליוצרי מושג ההוכחה המתמטית, וכן לראשונים שעסקו במתמטיקה לשם עצמה, כלומר כתחום מחקרי עיוני ומופשט ולא רק כעזר שימושי. עם זאת, לצדה",
+		status: EscapeStatus{},
+	},
+	{
+		name: "more hebrew", // old test was wrong, such text shouldn't be escaped
+		text: `בתקופה מאוחרת יותר, השתמשו היוונים בשיטת סימון מתקדמת יותר, שבה הוצגו המספרים לפי 22 אותיות האלפבית היווני. לסימון המספרים בין 1 ל-9 נקבעו תשע האותיות הראשונות, בתוספת גרש ( ' ) בצד ימין של האות, למעלה; תשע האותיות הבאות ייצגו את העשרות מ-10 עד 90, והבאות את המאות. לסימון הספרות בין 1000 ל-900,000, השתמשו היוונים באותן אותיות, אך הוסיפו לאותיות את הגרש דווקא מצד שמאל של האותיות, למטה. ממיליון ומעלה, כנראה השתמשו היוונים בשני תגים במקום אחד.
+
+			המתמטיקאי הבולט הראשון ביוון העתיקה, ויש האומרים בתולדות האנושות, הוא תאלס (624 לפנה"ס - 546 לפנה"ס בקירוב).[1] לא יהיה זה משולל יסוד להניח שהוא האדם הראשון שהוכיח משפט מתמטי, ולא רק גילה אותו. תאלס הוכיח שישרים מקבילים חותכים מצד אחד של שוקי זווית קטעים בעלי יחסים שווים (משפט תאלס הראשון), שהזווית המונחת על קוטר במעגל היא זווית ישרה (משפט תאלס השני), שהקוטר מחלק את המעגל לשני חלקים שווים, ושזוויות הבסיס במשולש שווה-שוקיים שוות זו לזו. מיוחסות לו גם שיטות למדידת גובהן של הפירמידות בעזרת מדידת צילן ולקביעת מיקומה של ספינה הנראית מן החוף.
+
+			בשנים 582 לפנה"ס עד 496 לפנה"ס, בקירוב, חי מתמטיקאי חשוב במיוחד - פיתגורס. המקורות הראשוניים עליו מועטים, וההיסטוריונים מתקשים להפריד את העובדות משכבת המסתורין והאגדות שנקשרו בו. ידוע שסביבו התקבצה האסכולה הפיתגוראית מעין כת פסבדו-מתמטית שהאמינה ש"הכל מספר", או ליתר דיוק הכל ניתן לכימות, וייחסה למספרים משמעויות מיסטיות. ככל הנראה הפיתגוראים ידעו לבנות את הגופים האפלטוניים, הכירו את הממוצע האריתמטי, הממוצע הגאומטרי והממוצע ההרמוני והגיעו להישגים חשובים נוספים. ניתן לומר שהפיתגוראים גילו את היותו של השורש הריבועי של 2, שהוא גם האלכסון בריבוע שאורך צלעותיו 1, אי רציונלי, אך תגליתם הייתה למעשה רק שהקטעים "חסרי מידה משותפת", ומושג המספר האי רציונלי מאוחר יותר.[2] אזכור ראשון לקיומם של קטעים חסרי מידה משותפת מופיע בדיאלוג "תאיטיטוס" של אפלטון, אך רעיון זה היה מוכר עוד קודם לכן, במאה החמישית לפנה"ס להיפאסוס, בן האסכולה הפיתגוראית, ואולי לפיתגורס עצמו.[3]`,
+		result: `בתקופה מאוחרת יותר, השתמשו היוונים בשיטת סימון מתקדמת יותר, שבה הוצגו המספרים לפי 22 אותיות האלפבית היווני. לסימון המספרים בין 1 ל-9 נקבעו תשע האותיות הראשונות, בתוספת גרש ( ' ) בצד ימין של האות, למעלה; תשע האותיות הבאות ייצגו את העשרות מ-10 עד 90, והבאות את המאות. לסימון הספרות בין 1000 ל-900,000, השתמשו היוונים באותן אותיות, אך הוסיפו לאותיות את הגרש דווקא מצד שמאל של האותיות, למטה. ממיליון ומעלה, כנראה השתמשו היוונים בשני תגים במקום אחד.
+
+			המתמטיקאי הבולט הראשון ביוון העתיקה, ויש האומרים בתולדות האנושות, הוא תאלס (624 לפנה"ס - 546 לפנה"ס בקירוב).[1] לא יהיה זה משולל יסוד להניח שהוא האדם הראשון שהוכיח משפט מתמטי, ולא רק גילה אותו. תאלס הוכיח שישרים מקבילים חותכים מצד אחד של שוקי זווית קטעים בעלי יחסים שווים (משפט תאלס הראשון), שהזווית המונחת על קוטר במעגל היא זווית ישרה (משפט תאלס השני), שהקוטר מחלק את המעגל לשני חלקים שווים, ושזוויות הבסיס במשולש שווה-שוקיים שוות זו לזו. מיוחסות לו גם שיטות למדידת גובהן של הפירמידות בעזרת מדידת צילן ולקביעת מיקומה של ספינה הנראית מן החוף.
+
+			בשנים 582 לפנה"ס עד 496 לפנה"ס, בקירוב, חי מתמטיקאי חשוב במיוחד - פיתגורס. המקורות הראשוניים עליו מועטים, וההיסטוריונים מתקשים להפריד את העובדות משכבת המסתורין והאגדות שנקשרו בו. ידוע שסביבו התקבצה האסכולה הפיתגוראית מעין כת פסבדו-מתמטית שהאמינה ש"הכל מספר", או ליתר דיוק הכל ניתן לכימות, וייחסה למספרים משמעויות מיסטיות. ככל הנראה הפיתגוראים ידעו לבנות את הגופים האפלטוניים, הכירו את הממוצע האריתמטי, הממוצע הגאומטרי והממוצע ההרמוני והגיעו להישגים חשובים נוספים. ניתן לומר שהפיתגוראים גילו את היותו של השורש הריבועי של 2, שהוא גם האלכסון בריבוע שאורך צלעותיו 1, אי רציונלי, אך תגליתם הייתה למעשה רק שהקטעים "חסרי מידה משותפת", ומושג המספר האי רציונלי מאוחר יותר.[2] אזכור ראשון לקיומם של קטעים חסרי מידה משותפת מופיע בדיאלוג "תאיטיטוס" של אפלטון, אך רעיון זה היה מוכר עוד קודם לכן, במאה החמישית לפנה"ס להיפאסוס, בן האסכולה הפיתגוראית, ואולי לפיתגורס עצמו.[3]`,
+		status: EscapeStatus{},
+	},
+	{
+		name: "Mixed RTL+LTR",
+		text: `Many computer programs fail to display bidirectional text correctly.
+For example, the Hebrew name Sarah (שרה) is spelled: sin (ש) (which appears rightmost),
+then resh (ר), and finally heh (ה) (which should appear leftmost).`,
+		result: `Many computer programs fail to display bidirectional text correctly.
+For example, the Hebrew name Sarah (שרה) is spelled: sin (ש) (which appears rightmost),
+then resh (ר), and finally heh (ה) (which should appear leftmost).`,
+		status: EscapeStatus{},
+	},
+	{
+		name: "Mixed RTL+LTR+BIDI",
+		text: `Many computer programs fail to display bidirectional text correctly.
+			For example, the Hebrew name Sarah ` + "\u2067" + `שרה` + "\u2066\n" +
+			`sin (ש) (which appears rightmost), then resh (ר), and finally heh (ה) (which should appear leftmost).`,
+		result: `Many computer programs fail to display bidirectional text correctly.
+			For example, the Hebrew name Sarah ` + "\u2067" + `שרה` + "\u2066\n" +
+			`sin (ש) (which appears rightmost), then resh (ר), and finally heh (ה) (which should appear leftmost).`,
+		status: EscapeStatus{},
+	},
+	{
+		name:   "Accented characters",
+		text:   string([]byte{0xc3, 0xa1, 0xc3, 0xa9, 0xc3, 0xad, 0xc3, 0xb3, 0xc3, 0xba}),
+		result: string([]byte{0xc3, 0xa1, 0xc3, 0xa9, 0xc3, 0xad, 0xc3, 0xb3, 0xc3, 0xba}),
+		status: EscapeStatus{},
+	},
+	{
+		name:   "Program",
+		text:   "string([]byte{0xc3, 0xa1, 0xc3, 0xa9, 0xc3, 0xad, 0xc3, 0xb3, 0xc3, 0xba})",
+		result: "string([]byte{0xc3, 0xa1, 0xc3, 0xa9, 0xc3, 0xad, 0xc3, 0xb3, 0xc3, 0xba})",
+		status: EscapeStatus{},
+	},
+	{
+		name:   "CVE testcase",
+		text:   "if access_level != \"user\u202E \u2066// Check if admin\u2069 \u2066\" {",
+		result: `if access_level != "user<span class="escaped-code-point" data-escaped="[U+202E]"><span class="char">` + "\u202e" + `</span></span> <span class="escaped-code-point" data-escaped="[U+2066]"><span class="char">` + "\u2066" + `</span></span>// Check if admin<span class="escaped-code-point" data-escaped="[U+2069]"><span class="char">` + "\u2069" + `</span></span> <span class="escaped-code-point" data-escaped="[U+2066]"><span class="char">` + "\u2066" + `</span></span>" {`,
+		status: EscapeStatus{Escaped: true, HasInvisible: true},
+	},
+	{
+		name: "Mixed testcase with fail",
+		text: `Many computer programs fail to display bidirectional text correctly.
+			For example, the Hebrew name Sarah ` + "\u2067" + `שרה` + "\u2066\n" +
+			`sin (ש) (which appears rightmost), then resh (ר), and finally heh (ה) (which should appear leftmost).` +
+			"\nif access_level != \"user\u202E \u2066// Check if admin\u2069 \u2066\" {\n",
+		result: `Many computer programs fail to display bidirectional text correctly.
+			For example, the Hebrew name Sarah ` + "\u2067" + `שרה` + "\u2066\n" +
+			`sin (ש) (which appears rightmost), then resh (ר), and finally heh (ה) (which should appear leftmost).` +
+			"\n" + `if access_level != "user<span class="escaped-code-point" data-escaped="[U+202E]"><span class="char">` + "\u202e" + `</span></span> <span class="escaped-code-point" data-escaped="[U+2066]"><span class="char">` + "\u2066" + `</span></span>// Check if admin<span class="escaped-code-point" data-escaped="[U+2069]"><span class="char">` + "\u2069" + `</span></span> <span class="escaped-code-point" data-escaped="[U+2066]"><span class="char">` + "\u2066" + `</span></span>" {` + "\n",
+		status: EscapeStatus{Escaped: true, HasInvisible: true},
+	},
+	{
+		// UTF-8/16/32 all use the same codepoint for BOM
+		// Gitea could read UTF-16/32 content and convert into UTF-8 internally then render it, so we only process UTF-8 internally
+		name:   "UTF BOM",
+		text:   "\xef\xbb\xbftest<b>\xef\xbb\xbftest\xef\xbb\xbf",
+		result: "\xef\xbb\xbftest<b>\xef\xbb\xbftest" + `<span class="escaped-code-point" data-escaped="[U+FEFF]"><span class="char">` + "\xef\xbb\xbf" + `</span></span>`,
+		status: EscapeStatus{Escaped: true, HasInvisible: true},
+	},
+	{
+		name:   "ambiguous",
+		text:   "O𝐾",
+		result: `O<span class="ambiguous-code-point" data-tooltip-content="repo.ambiguous_character:𝐾 [U+1D43E],K [U+004B]"><span class="char">𝐾</span></span>`,
+		status: EscapeStatus{Escaped: true, HasAmbiguous: true},
+	},
+	{
+		name:   "long text analyzed in overlapping windows",
+		text:   strings.Repeat("a", 4095) + "\u202e\u0436" + strings.Repeat("a", 5000) + "\u202e",
+		result: strings.Repeat("a", 4095) + "\u202e\u0436" + strings.Repeat("a", 5000) + `<span class="escaped-code-point" data-escaped="[U+202E]"><span class="char">` + "\u202e" + `</span></span>`,
+		status: EscapeStatus{Escaped: true, HasInvisible: true},
+	},
+	{
+		name:   "broken byte before tag",
+		text:   "00\xa9<b>",
+		result: `00<span class="broken-code-point">�</span><b>`,
+	},
+	{
+		name:   "ambiguous in math",
+		text:   `<maTH display="block"><mo>−</mo></MAth><mathx>−`,
+		result: `<maTH display="block"><mo>−</mo></MAth><mathx><span class="ambiguous-code-point" data-tooltip-content="repo.ambiguous_character:− [U+2212],- [U+002D]"><span class="char">−</span></span>`,
+		status: EscapeStatus{Escaped: true, HasAmbiguous: true},
+	},
+}
+
+func TestEscapeControlHTML(t *testing.T) {
+	for _, tt := range escapeControlTests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, output := EscapeControlHTML(template.HTML(tt.text), &translation.MockLocale{})
+			assert.Equal(t, tt.status, *status)
+			assert.EqualValues(t, tt.result, output)
+		})
+	}
+}
+
+func TestSettingAmbiguousUnicodeDetection(t *testing.T) {
+	defer test.MockVariableValue(&setting.UI.AmbiguousUnicodeDetection, true)()
+	_, out := EscapeControlHTML("a test", &translation.MockLocale{})
+	assert.EqualValues(t, `a<span class="escaped-code-point" data-escaped="[U+00A0]"><span class="char"> </span></span>test`, out)
+	setting.UI.AmbiguousUnicodeDetection = false
+	_, out = EscapeControlHTML("a test", &translation.MockLocale{})
+	assert.EqualValues(t, `a test`, out)
+}

@@ -1,0 +1,48 @@
+// Copyright 2023 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
+package internal
+
+import "gitea.dev/modules/timeutil"
+
+type FileUpdate struct {
+	Filename string
+	BlobSha  string
+	Size     int64
+}
+
+// RepoChanges changes (file additions/updates/removals) to a repo
+type RepoChanges struct {
+	Updates          []FileUpdate
+	RemovedFilenames []string
+}
+
+// IndexerData represents data stored in the code indexer
+type IndexerData struct {
+	RepoID int64
+}
+
+// SearchResult result of performing a search in a repo
+type SearchResult struct {
+	RepoID      int64
+	Filename    string
+	Content     string
+	CommitID    string
+	UpdatedUnix timeutil.TimeStamp
+	Language    string
+	Color       string
+
+	ContentMatches []MatchRange // byte ranges into Content
+}
+
+// MatchRange is the byte range [Start, End) of a matched term
+type MatchRange struct {
+	Start, End int
+}
+
+// SearchResultLanguages result of top languages count in search results
+type SearchResultLanguages struct {
+	Language string
+	Color    string
+	Count    int
+}

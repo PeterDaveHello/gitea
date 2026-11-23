@@ -1,9 +1,23 @@
 // Copyright 2016 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
-//+build bindata
+//go:build bindata
+
+//go:generate go run ../../build/generate-bindata.go ../../templates bindata.dat
 
 package templates
 
-//go:generate go run -mod=vendor ../../build/generate-bindata.go ../../templates templates bindata.go
+import (
+	"sync"
+
+	"gitea.dev/modules/assetfs"
+
+	_ "embed"
+)
+
+//go:embed bindata.dat
+var bindata []byte
+
+var BuiltinAssets = sync.OnceValue(func() *assetfs.Layer {
+	return assetfs.Bindata("builtin(bindata)", assetfs.NewEmbeddedFS(bindata))
+})

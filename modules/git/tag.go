@@ -1,70 +1,100 @@
 // Copyright 2015 The Gogs Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package git
 
 import (
 	"bytes"
+	"context"
 	"sort"
-	"strings"
+	"time"
+
+	"gitea.dev/modules/util"
 )
 
 // Tag represents a Git tag.
 type Tag struct {
-	Name    string
-	ID      SHA1
-	repo    *Repository
-	Object  SHA1 // The id of this commit object
-	Type    string
-	Tagger  *Signature
-	Message string
+	CommitMessage
+
+	Name      string
+	ID        ObjectID
+	Object    ObjectID // The id of this commit object
+	Type      string
+	Tagger    *Signature
+	Signature *CommitSignature
+
+	CommitDate time.Time // committer date of Object, only GetTagInfos resolves it
 }
 
-// Commit return the commit of the tag reference
-func (tag *Tag) Commit() (*Commit, error) {
-	return tag.repo.getCommit(tag.Object)
+func parsePayloadSignature(data []byte, messageStart int) (payload, msg, sign string) {
+	pos := messageStart
+	signStart, signEnd := -1, -1
+	for {
+		eol := bytes.IndexByte(data[pos:], '\n')
+		if eol < 0 {
+			break
+		}
+		line := data[pos : pos+eol]
+		signType, hasPrefix := bytes.CutPrefix(line, []byte("-----BEGIN "))
+		signType, hasSuffix := bytes.CutSuffix(signType, []byte(" SIGNATURE-----"))
+		if hasPrefix && hasSuffix {
+			signEndBytes := append([]byte("\n-----END "), signType...)
+			signEndBytes = append(signEndBytes, []byte(" SIGNATURE-----")...)
+			signEnd = bytes.Index(data[pos:], signEndBytes)
+			if signEnd != -1 {
+				signStart = pos
+				signEnd = pos + signEnd + len(signEndBytes)
+			}
+		}
+		pos += eol + 1
+	}
+
+	if signStart != -1 && signEnd != -1 {
+		msgEnd := max(messageStart, signStart-1)
+		return string(data[:msgEnd]), string(data[messageStart:msgEnd]), string(data[signStart:signEnd])
+	}
+	return string(data), string(data[messageStart:]), ""
 }
 
 // Parse commit information from the (uncompressed) raw
 // data from the commit object.
 // \n\n separate headers from message
-func parseTagData(data []byte) (*Tag, error) {
+func parseTagData(objectFormat ObjectFormat, data []byte) (*Tag, error) {
 	tag := new(Tag)
-	// we now have the contents of the commit object. Let's investigate...
-	nextline := 0
-l:
+	tag.ID = objectFormat.EmptyObjectID()
+	tag.Object = objectFormat.EmptyObjectID()
+	tag.Tagger = &Signature{}
+
+	pos := 0
 	for {
-		eol := bytes.IndexByte(data[nextline:], '\n')
-		switch {
-		case eol > 0:
-			line := data[nextline : nextline+eol]
-			spacepos := bytes.IndexByte(line, ' ')
-			reftype := line[:spacepos]
-			switch string(reftype) {
-			case "object":
-				id, err := NewIDFromString(string(line[spacepos+1:]))
-				if err != nil {
-					return nil, err
-				}
-				tag.Object = id
-			case "type":
-				// A commit can have one or more parents
-				tag.Type = string(line[spacepos+1:])
-			case "tagger":
-				sig, err := newSignatureFromCommitline(line[spacepos+1:])
-				if err != nil {
-					return nil, err
-				}
-				tag.Tagger = sig
-			}
-			nextline += eol + 1
-		case eol == 0:
-			tag.Message = strings.TrimRight(string(data[nextline+1:]), "\n")
-			break l
-		default:
-			break l
+		eol := bytes.IndexByte(data[pos:], '\n')
+		if eol == -1 {
+			break // shouldn't happen, but could just tolerate it
 		}
+		if eol == 0 {
+			pos++
+			break // end of headers
+		}
+		line := data[pos : pos+eol]
+		key, val, _ := bytes.Cut(line, []byte(" "))
+		switch string(key) {
+		case "object":
+			id, err := NewIDFromString(string(val))
+			if err != nil {
+				return nil, err
+			}
+			tag.Object = id
+		case "type":
+			tag.Type = string(val) // A commit can have one or more parents
+		case "tagger":
+			tag.Tagger = parseSignatureFromCommitLine(util.UnsafeBytesToString(val))
+		}
+		pos += eol + 1
+	}
+	payload, msg, sign := parsePayloadSignature(data, pos)
+	tag.MessageRaw = msg
+	if len(sign) > 0 {
+		tag.Signature = &CommitSignature{Signature: sign, Payload: payload}
 	}
 	return tag, nil
 }
@@ -87,4 +117,9 @@ func (ts tagSorter) Swap(i, j int) {
 func sortTagsByTime(tags []*Tag) {
 	sorter := tagSorter(tags)
 	sort.Sort(sorter)
+}
+
+// IsTagExist returns true if given tag exists in the repository.
+func IsTagExist(ctx context.Context, repo RepositoryFacade, name string) bool {
+	return IsReferenceExist(ctx, repo, TagPrefix+name)
 }

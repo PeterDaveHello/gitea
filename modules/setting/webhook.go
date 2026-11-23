@@ -1,42 +1,47 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package setting
 
 import (
 	"net/url"
 
-	"code.gitea.io/gitea/modules/log"
+	"gitea.dev/modules/log"
 )
 
-var (
-	// Webhook settings
-	Webhook = struct {
-		QueueLength    int
-		DeliverTimeout int
-		SkipTLSVerify  bool
-		Types          []string
-		PagingNum      int
-		ProxyURL       string
-		ProxyURLFixed  *url.URL
-		ProxyHosts     []string
-	}{
-		QueueLength:    1000,
-		DeliverTimeout: 5,
-		SkipTLSVerify:  false,
-		PagingNum:      10,
-		ProxyURL:       "",
-		ProxyHosts:     []string{},
-	}
-)
+// Webhook settings
+var Webhook = struct {
+	QueueLength     int
+	DeliverTimeout  int
+	SkipTLSVerify   bool
+	AllowedHostList string
+	Types           []string
+	PagingNum       int
+	ProxyURL        string
+	ProxyURLFixed   *url.URL
+	ProxyHosts      []string
+}{
+	QueueLength:    1000,
+	DeliverTimeout: 5,
+	SkipTLSVerify:  false,
+	PagingNum:      10,
+	ProxyURL:       "",
+	ProxyHosts:     []string{},
+}
 
-func newWebhookService() {
-	sec := Cfg.Section("webhook")
+func loadWebhookFrom(rootCfg ConfigProvider) {
+	sec := rootCfg.Section("webhook")
 	Webhook.QueueLength = sec.Key("QUEUE_LENGTH").MustInt(1000)
 	Webhook.DeliverTimeout = sec.Key("DELIVER_TIMEOUT").MustInt(5)
 	Webhook.SkipTLSVerify = sec.Key("SKIP_TLS_VERIFY").MustBool()
-	Webhook.Types = []string{"gitea", "gogs", "slack", "discord", "dingtalk", "telegram", "msteams", "feishu", "matrix"}
+
+	deprecatedSetting(rootCfg, "webhook", "ALLOWED_HOST_LIST", "security", "ALLOWED_HOST_LIST")
+	Webhook.AllowedHostList = sec.Key("ALLOWED_HOST_LIST").MustString(Security.AllowedHostList)
+	if Webhook.AllowedHostList != Security.AllowedHostList {
+		checkHostList("[webhook] ALLOWED_HOST_LIST", Webhook.AllowedHostList, false)
+	}
+
+	Webhook.Types = []string{"gitea", "gogs", "slack", "discord", "dingtalk", "telegram", "msteams", "feishu", "matrix", "wechatwork", "packagist"}
 	Webhook.PagingNum = sec.Key("PAGING_NUM").MustInt(10)
 	Webhook.ProxyURL = sec.Key("PROXY_URL").MustString("")
 	if Webhook.ProxyURL != "" {

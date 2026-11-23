@@ -1,188 +1,216 @@
 // Copyright 2016 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package routers
 
 import (
 	"context"
-	"fmt"
-	"strings"
-	"time"
+	"net/http"
+	"reflect"
+	"runtime"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/models/migrations"
-	"code.gitea.io/gitea/modules/auth/sso"
-	"code.gitea.io/gitea/modules/cache"
-	"code.gitea.io/gitea/modules/cron"
-	"code.gitea.io/gitea/modules/eventsource"
-	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/highlight"
-	code_indexer "code.gitea.io/gitea/modules/indexer/code"
-	issue_indexer "code.gitea.io/gitea/modules/indexer/issues"
-	stats_indexer "code.gitea.io/gitea/modules/indexer/stats"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/markup"
-	"code.gitea.io/gitea/modules/markup/external"
-	"code.gitea.io/gitea/modules/notification"
-	"code.gitea.io/gitea/modules/options"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/ssh"
-	"code.gitea.io/gitea/modules/storage"
-	"code.gitea.io/gitea/modules/svg"
-	"code.gitea.io/gitea/modules/task"
-	"code.gitea.io/gitea/modules/webhook"
-	"code.gitea.io/gitea/services/mailer"
-	mirror_service "code.gitea.io/gitea/services/mirror"
-	pull_service "code.gitea.io/gitea/services/pull"
-
-	"gitea.com/macaron/i18n"
-	"gitea.com/macaron/macaron"
+	"gitea.dev/models"
+	authmodel "gitea.dev/models/auth"
+	"gitea.dev/modules/cache"
+	"gitea.dev/modules/git"
+	"gitea.dev/modules/git/gitcmd"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/markup"
+	"gitea.dev/modules/markup/external"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/ssh"
+	"gitea.dev/modules/storage"
+	"gitea.dev/modules/svg"
+	"gitea.dev/modules/system"
+	"gitea.dev/modules/translation"
+	"gitea.dev/modules/web"
+	"gitea.dev/modules/web/routing"
+	actions_router "gitea.dev/routers/api/actions"
+	packages_router "gitea.dev/routers/api/packages"
+	apiv1 "gitea.dev/routers/api/v1"
+	"gitea.dev/routers/common"
+	"gitea.dev/routers/private"
+	web_routers "gitea.dev/routers/web"
+	actions_service "gitea.dev/services/actions"
+	asymkey_service "gitea.dev/services/asymkey"
+	"gitea.dev/services/auth"
+	"gitea.dev/services/auth/source/oauth2"
+	"gitea.dev/services/automerge"
+	"gitea.dev/services/cron"
+	feed_service "gitea.dev/services/feed"
+	gitproxy_service "gitea.dev/services/gitproxy"
+	indexer_service "gitea.dev/services/indexer"
+	"gitea.dev/services/mailer"
+	mailer_incoming "gitea.dev/services/mailer/incoming"
+	markup_service "gitea.dev/services/markup"
+	mirror_service "gitea.dev/services/mirror"
+	"gitea.dev/services/oauth2_provider"
+	packages_spec "gitea.dev/services/packages/pkgspec"
+	pull_service "gitea.dev/services/pull"
+	release_service "gitea.dev/services/release"
+	repo_service "gitea.dev/services/repository"
+	"gitea.dev/services/repository/archiver"
+	"gitea.dev/services/task"
+	"gitea.dev/services/uinotification"
+	user_service "gitea.dev/services/user"
+	"gitea.dev/services/webhook"
+	websocket_service "gitea.dev/services/websocket"
 )
 
-func checkRunMode() {
-	switch setting.Cfg.Section("").Key("RUN_MODE").String() {
-	case "prod":
-		macaron.Env = macaron.PROD
-		macaron.ColorLog = false
-		setting.ProdMode = true
-	default:
-		git.Debug = true
+func mustInit(fn func() error) {
+	err := fn()
+	if err != nil {
+		ptr := reflect.ValueOf(fn).Pointer()
+		fi := runtime.FuncForPC(ptr)
+		log.Fatal("%s failed: %v", fi.Name(), err)
 	}
-	log.Info("Run Mode: %s", strings.Title(macaron.Env))
 }
 
-// NewServices init new services
-func NewServices() {
-	setting.NewServices()
-	if err := storage.Init(); err != nil {
-		log.Fatal("storage init failed: %v", err)
+func mustInitCtx(ctx context.Context, fn func(ctx context.Context) error) {
+	err := fn(ctx)
+	if err != nil {
+		ptr := reflect.ValueOf(fn).Pointer()
+		fi := runtime.FuncForPC(ptr)
+		log.Fatal("%s(ctx) failed: %v", fi.Name(), err)
 	}
-	mailer.NewContext()
-	_ = cache.NewContext()
-	notification.NewContext()
 }
 
-// In case of problems connecting to DB, retry connection. Eg, PGSQL in Docker Container on Synology
-func initDBEngine(ctx context.Context) (err error) {
-	log.Info("Beginning ORM engine initialization.")
-	for i := 0; i < setting.Database.DBConnectRetries; i++ {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("Aborted due to shutdown:\nin retry ORM engine initialization")
-		default:
-		}
-		log.Info("ORM engine initialization attempt #%d/%d...", i+1, setting.Database.DBConnectRetries)
-		if err = models.NewEngine(ctx, migrations.Migrate); err == nil {
-			break
-		} else if i == setting.Database.DBConnectRetries-1 {
-			return err
-		}
-		log.Error("ORM engine initialization attempt #%d/%d failed. Error: %v", i+1, setting.Database.DBConnectRetries, err)
-		log.Info("Backing off for %d seconds", int64(setting.Database.DBConnectBackoff/time.Second))
-		time.Sleep(setting.Database.DBConnectBackoff)
+func syncAppConfForGit(ctx context.Context) error {
+	runtimeState := new(system.RuntimeState)
+	if err := system.AppState.Get(ctx, runtimeState); err != nil {
+		return err
 	}
-	models.HasEngine = true
+
+	updated := false
+	if runtimeState.LastAppPath != setting.AppPath {
+		log.Info("AppPath changed from '%s' to '%s'", runtimeState.LastAppPath, setting.AppPath)
+		runtimeState.LastAppPath = setting.AppPath
+		updated = true
+	}
+	if runtimeState.LastCustomConf != setting.CustomConf {
+		log.Info("CustomConf changed from '%s' to '%s'", runtimeState.LastCustomConf, setting.CustomConf)
+		runtimeState.LastCustomConf = setting.CustomConf
+		updated = true
+	}
+
+	if updated {
+		log.Info("re-sync repository hooks ...")
+		mustInitCtx(ctx, repo_service.SyncRepositoryHooks)
+
+		log.Info("re-write ssh public keys ...")
+		mustInitCtx(ctx, asymkey_service.RewriteAllPublicKeys)
+
+		return system.AppState.Set(ctx, runtimeState)
+	}
 	return nil
 }
 
-// InitLocales loads the locales
-func InitLocales() {
-	localeNames, err := options.Dir("locale")
-
-	if err != nil {
-		log.Fatal("Failed to list locale files: %v", err)
-	}
-	localFiles := make(map[string][]byte)
-
-	for _, name := range localeNames {
-		localFiles[name], err = options.Locale(name)
-
-		if err != nil {
-			log.Fatal("Failed to load %s locale file. %v", name, err)
-		}
-	}
-	i18n.I18n(i18n.Options{
-		SubURL:       setting.AppSubURL,
-		Files:        localFiles,
-		Langs:        setting.Langs,
-		Names:        setting.Names,
-		DefaultLang:  "en-US",
-		Redirect:     false,
-		CookieDomain: setting.SessionConfig.Domain,
-	})
+func InitWebInstallPage(ctx context.Context) {
+	translation.InitLocales(ctx)
+	setting.LoadSettingsForInstall()
+	mustInit(svg.Init)
 }
 
-// GlobalInit is for global configuration reload-able.
-func GlobalInit(ctx context.Context) {
-	setting.NewContext()
-	if err := git.Init(ctx); err != nil {
-		log.Fatal("Git module init failed: %v", err)
+// InitWebInstalled is for the global configuration of an installed instance
+func InitWebInstalled(ctx context.Context) {
+	mustInit(git.InitFull)
+	log.Info("Git version: %s (home: %s)", git.DefaultFeatures().VersionInfo(), gitcmd.HomeDir())
+	if !git.DefaultFeatures().SupportHashSha256 {
+		log.Warn("sha256 hash support is disabled - requires Git >= 2.42.")
 	}
-	setting.CheckLFSVersion()
-	log.Trace("AppPath: %s", setting.AppPath)
-	log.Trace("AppWorkPath: %s", setting.AppWorkPath)
-	log.Trace("Custom path: %s", setting.CustomPath)
-	log.Trace("Log path: %s", setting.LogRootPath)
 
 	// Setup i18n
-	InitLocales()
+	translation.InitLocales(ctx)
 
-	NewServices()
+	setting.LoadSettings()
+	mustInit(storage.Init)
 
-	if setting.InstallLock {
-		highlight.NewContext()
-		external.RegisterParsers()
-		markup.Init()
-		if err := initDBEngine(ctx); err == nil {
-			log.Info("ORM engine initialization successful!")
-		} else {
-			log.Fatal("ORM engine initialization failed: %v", err)
-		}
+	mailer.NewContext(ctx)
+	mustInit(cache.Init)
+	mustInit(feed_service.Init)
+	mustInit(uinotification.Init)
+	mustInitCtx(ctx, archiver.Init)
 
-		if err := models.InitOAuth2(); err != nil {
-			log.Fatal("Failed to initialize OAuth2 support: %v", err)
-		}
+	external.RegisterRenderers()
+	markup.Init(markup_service.FormalRenderHelperFuncs())
 
-		models.NewRepoContext()
+	mustInitCtx(ctx, common.InitDBEngine)
+	log.Info("ORM engine initialization successful!")
+	mustInit(system.Init)
+	mustInitCtx(ctx, oauth2.Init)
+	mustInitCtx(ctx, oauth2_provider.Init)
+	mustInit(release_service.Init)
 
-		// Booting long running goroutines.
-		cron.NewContext()
-		issue_indexer.InitIssueIndexer(false)
-		code_indexer.Init()
-		if err := stats_indexer.Init(); err != nil {
-			log.Fatal("Failed to initialize repository stats indexer queue: %v", err)
-		}
-		mirror_service.InitSyncMirrors()
-		webhook.InitDeliverHooks()
-		if err := pull_service.Init(); err != nil {
-			log.Fatal("Failed to initialize test pull requests queue: %v", err)
-		}
-		if err := task.Init(); err != nil {
-			log.Fatal("Failed to initialize task scheduler: %v", err)
-		}
-		eventsource.GetManager().Init()
+	mustInitCtx(ctx, models.Init)
+	mustInitCtx(ctx, authmodel.Init)
+	mustInitCtx(ctx, repo_service.Init)
+	mustInit(packages_spec.InitManager)
+
+	// Booting long running goroutines.
+	mustInitCtx(ctx, gitproxy_service.Run) // must start before mirror/migration services spawn git
+	mustInit(indexer_service.Init)
+
+	mirror_service.InitSyncMirrors()
+	mustInit(webhook.Init)
+	mustInit(pull_service.Init)
+	mustInitCtx(ctx, automerge.Init)
+	mustInit(task.Init)
+	mustInit(websocket_service.Init)
+	mustInitCtx(ctx, mailer_incoming.Init)
+
+	mustInitCtx(ctx, syncAppConfForGit)
+	mustInitCtx(ctx, user_service.SyncForcedActivityVisibility)
+
+	mustInit(ssh.Init)
+
+	auth.Init()
+	mustInit(svg.Init)
+
+	mustInitCtx(ctx, actions_service.Init)
+
+	mustInit(repo_service.InitLicenseClassifier)
+
+	// Finally start up the cron
+	cron.Init(ctx)
+}
+
+// NormalRoutes represents non install routes
+func NormalRoutes() *web.Router {
+	r := web.NewRouter()
+	r.BeforeRouting(common.ProtocolMiddlewares()...)
+
+	r.AfterRouting(common.MaintenanceModeHandler())
+
+	r.Mount("/", web_routers.Routes())
+	r.Mount("/api/v1", apiv1.Routes())
+	r.Mount("/api/internal", private.Routes())
+
+	r.Post("/-/fetch-redirect", common.FetchRedirectDelegate)
+
+	if setting.Packages.Enabled {
+		// This implements package support for most package managers
+		r.Mount("/api/packages", packages_router.CommonRoutes())
+		// This implements the OCI API, this container registry "/v2" endpoint must be in the root of the site.
+		// If site admin deploys Gitea in a sub-path, they must configure their reverse proxy to map the "https://host/v2" endpoint to Gitea.
+		r.Mount("/v2", packages_router.ContainerRoutes())
 	}
-	if setting.EnableSQLite3 {
-		log.Info("SQLite3 Supported")
-	}
-	checkRunMode()
 
-	// Now because Install will re-run GlobalInit once it has set InstallLock
-	// we can't tell if the ssh port will remain unused until that's done.
-	// However, see FIXME comment in install.go
-	if setting.InstallLock {
-		if setting.SSH.StartBuiltinServer {
-			ssh.Listen(setting.SSH.ListenHost, setting.SSH.ListenPort, setting.SSH.ServerCiphers, setting.SSH.ServerKeyExchanges, setting.SSH.ServerMACs)
-			log.Info("SSH server started on %s:%d. Cipher list (%v), key exchange algorithms (%v), MACs (%v)", setting.SSH.ListenHost, setting.SSH.ListenPort, setting.SSH.ServerCiphers, setting.SSH.ServerKeyExchanges, setting.SSH.ServerMACs)
-		} else {
-			ssh.Unused()
-		}
+	if setting.Actions.Enabled {
+		prefix := "/api/actions"
+		r.Mount(prefix, actions_router.Routes(prefix))
+
+		// TODO: Pipeline api used for runner internal communication with gitea server. but only artifact is used for now.
+		// In Github, it uses ACTIONS_RUNTIME_URL=https://pipelines.actions.githubusercontent.com/fLgcSHkPGySXeIFrg8W8OBSfeg3b5Fls1A1CwX566g8PayEGlg/
+		// TODO: this prefix should be generated with a token string with runner ?
+		prefix = "/api/actions_pipeline"
+		r.Mount(prefix, actions_router.ArtifactsRoutes(prefix))
+		prefix = actions_router.ArtifactV4RouteBase
+		r.Mount(prefix, actions_router.ArtifactsV4Routes(prefix))
 	}
 
-	if setting.InstallLock {
-		sso.Init()
-	}
-
-	svg.Init()
+	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
+		defer routing.RecordFuncInfo(req.Context(), routing.GetFuncInfo(http.NotFound, "GlobalNotFound"))()
+		http.NotFound(w, req)
+	})
+	return r
 }

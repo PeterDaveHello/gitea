@@ -1,90 +1,43 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package repository
 
 import (
-	"fmt"
-	"strings"
-	"time"
+	"context"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/structs"
+	"gitea.dev/models/organization"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/setting"
 )
 
-// ForkRepository forks a repository
-func ForkRepository(doer, owner *models.User, oldRepo *models.Repository, name, desc string) (_ *models.Repository, err error) {
-	forkedRepo, err := oldRepo.GetUserFork(owner.ID)
+// CanUserForkBetweenOwners returns true if user can fork between owners.
+// By default, a user can fork a repository from another owner, but not from themselves.
+// Many users really like to fork their own repositories, so add an experimental setting to allow this.
+func CanUserForkBetweenOwners(id1, id2 int64) bool {
+	if id1 != id2 {
+		return true
+	}
+	return setting.Repository.AllowForkIntoSameOwner
+}
+
+// CanUserForkRepo returns true if specified user can fork repository.
+func CanUserForkRepo(ctx context.Context, user *user_model.User, repo *repo_model.Repository) (bool, error) {
+	if user == nil {
+		return false, nil
+	}
+	if CanUserForkBetweenOwners(repo.OwnerID, user.ID) && !repo_model.HasForkedRepo(ctx, user.ID, repo.ID) {
+		return true, nil
+	}
+	ownedOrgs, err := organization.GetOrgsCanCreateRepoByUserID(ctx, user.ID)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
-	if forkedRepo != nil {
-		return nil, models.ErrForkAlreadyExist{
-			Uname:    owner.Name,
-			RepoName: oldRepo.FullName(),
-			ForkName: forkedRepo.FullName(),
+	for _, org := range ownedOrgs {
+		if CanUserForkBetweenOwners(repo.OwnerID, org.ID) && !repo_model.HasForkedRepo(ctx, org.ID, repo.ID) {
+			return true, nil
 		}
 	}
-
-	repo := &models.Repository{
-		OwnerID:       owner.ID,
-		Owner:         owner,
-		OwnerName:     owner.Name,
-		Name:          name,
-		LowerName:     strings.ToLower(name),
-		Description:   desc,
-		DefaultBranch: oldRepo.DefaultBranch,
-		IsPrivate:     oldRepo.IsPrivate || oldRepo.Owner.Visibility == structs.VisibleTypePrivate,
-		IsEmpty:       oldRepo.IsEmpty,
-		IsFork:        true,
-		ForkID:        oldRepo.ID,
-	}
-
-	oldRepoPath := oldRepo.RepoPath()
-
-	err = models.WithTx(func(ctx models.DBContext) error {
-		if err = models.CreateRepository(ctx, doer, owner, repo); err != nil {
-			return err
-		}
-
-		if err = models.IncrementRepoForkNum(ctx, oldRepo.ID); err != nil {
-			return err
-		}
-
-		repoPath := models.RepoPath(owner.Name, repo.Name)
-		if stdout, err := git.NewCommand(
-			"clone", "--bare", oldRepoPath, repoPath).
-			SetDescription(fmt.Sprintf("ForkRepository(git clone): %s to %s", oldRepo.FullName(), repo.FullName())).
-			RunInDirTimeout(10*time.Minute, ""); err != nil {
-			log.Error("Fork Repository (git clone) Failed for %v (from %v):\nStdout: %s\nError: %v", repo, oldRepo, stdout, err)
-			return fmt.Errorf("git clone: %v", err)
-		}
-
-		if stdout, err := git.NewCommand("update-server-info").
-			SetDescription(fmt.Sprintf("ForkRepository(git update-server-info): %s", repo.FullName())).
-			RunInDir(repoPath); err != nil {
-			log.Error("Fork Repository (git update-server-info) failed for %v:\nStdout: %s\nError: %v", repo, stdout, err)
-			return fmt.Errorf("git update-server-info: %v", err)
-		}
-
-		if err = createDelegateHooks(repoPath); err != nil {
-			return fmt.Errorf("createDelegateHooks: %v", err)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	ctx := models.DefaultDBContext()
-	if err = repo.UpdateSize(ctx); err != nil {
-		log.Error("Failed to update size for repository: %v", err)
-	}
-	if err := models.CopyLanguageStat(oldRepo, repo); err != nil {
-		log.Error("Copy language stat from oldRepo failed")
-	}
-	return repo, models.CopyLFS(ctx, repo, oldRepo)
+	return false, nil
 }

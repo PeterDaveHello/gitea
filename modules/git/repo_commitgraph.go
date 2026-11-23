@@ -1,36 +1,19 @@
-// Copyright 2019 The Gitea Authors.
-// All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// Copyright 2022 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
 
 package git
 
 import (
-	"os"
-	"path"
+	"context"
+	"fmt"
 
-	gitealog "code.gitea.io/gitea/modules/log"
-
-	"github.com/go-git/go-git/v5/plumbing/format/commitgraph"
-	cgobject "github.com/go-git/go-git/v5/plumbing/object/commitgraph"
+	"gitea.dev/modules/git/gitcmd"
 )
 
-// CommitNodeIndex returns the index for walking commit graph
-func (r *Repository) CommitNodeIndex() (cgobject.CommitNodeIndex, *os.File) {
-	indexPath := path.Join(r.Path, "objects", "info", "commit-graph")
-
-	file, err := os.Open(indexPath)
-	if err == nil {
-		var index commitgraph.Index
-		index, err = commitgraph.OpenFileIndex(file)
-		if err == nil {
-			return cgobject.NewGraphCommitNodeIndex(index, r.gogitRepo.Storer), file
-		}
+// WriteCommitGraph write commit graph to speed up repo access
+func WriteCommitGraph(ctx context.Context, repo RepositoryFacade) error {
+	if _, _, err := gitcmd.NewCommand("commit-graph", "write").WithRepo(repo).RunStdString(ctx); err != nil {
+		return fmt.Errorf("unable to write commit-graph for '%s' : %w", repo.GitRepoLocation(), err)
 	}
-
-	if !os.IsNotExist(err) {
-		gitealog.Warn("Unable to read commit-graph for %s: %v", r.Path, err)
-	}
-
-	return cgobject.NewObjectCommitNodeIndex(r.gogitRepo.Storer), nil
+	return nil
 }

@@ -1,19 +1,14 @@
-{{template "base/head" .}}
-<div class="repository settings lfs">
-	{{template "repo/header" .}}
-	{{template "repo/settings/navbar" .}}
-	<div class="ui container repository file list">
-		{{template "base/alert" .}}
+{{template "repo/settings/layout_head" (dict "pageClass" "repository settings lfs")}}
+	<div class="user-main-content twelve wide column content repository file list">
 		<div class="tab-size-8 non-diff-file-content">
 			<h4 class="ui top attached header">
-				<a href="{{.LFSFilesLink}}">{{.i18n.Tr "repo.settings.lfs"}}</a> / {{.i18n.Tr "repo.settings.lfs_locks"}} ({{.i18n.Tr "admin.total" .Total}})
+				<a href="{{.LFSFilesLink}}">{{ctx.Locale.Tr "repo.settings.lfs"}}</a> / {{ctx.Locale.Tr "repo.settings.lfs_locks"}} ({{ctx.Locale.Tr "admin.total" .Total}})
 			</h4>
 			<div class="ui attached segment">
-				<form class="ui form ignore-dirty" method="POST">
-					{{$.CsrfTokenHtml}}
+				<form class="ui form ignore-dirty" method="post">
 					<div class="ui fluid action input">
-						<input name="path" value="" placeholder="{{.i18n.Tr "repo.settings.lfs_lock_path"}}" autofocus>
-						<button class="ui blue button">{{.i18n.Tr "repo.settings.lfs_lock"}}</button>
+						<input name="path" value="" placeholder="{{ctx.Locale.Tr "repo.settings.lfs_lock_path"}}" autofocus>
+						<button type="submit" class="ui primary button">{{ctx.Locale.Tr "repo.settings.lfs_lock"}}</button>
 					</div>
 				</form>
 			</div>
@@ -23,33 +18,32 @@
 						<tr>
 							<td>
 								{{if index $.Linkable $index}}
-									{{svg "octicon-file" 16}}
-								<a href="{{EscapePound $.RepoLink}}/src/branch/{{EscapePound $lock.Repo.DefaultBranch}}/{{EscapePound $lock.Path}}" title="{{$lock.Path}}">{{$lock.Path}}</a>
+									{{svg "octicon-file"}}
+								<a href="{{$.RepoLink}}/src/branch/{{PathEscapeSegments $.Repository.DefaultBranch}}/{{PathEscapeSegments $lock.Path}}" title="{{$lock.Path}}">{{$lock.Path}}</a>
 								{{else}}
-									{{svg "octicon-diff" 16}}
-								<span class="poping up" title="{{$.i18n.Tr "repo.settings.lfs_lock_file_no_exist"}}">{{$lock.Path}}</span>
+									{{svg "octicon-diff"}}
+								<span data-tooltip-content="{{ctx.Locale.Tr "repo.settings.lfs_lock_file_no_exist"}}">{{$lock.Path}}</span>
 								{{end}}
 								{{if not (index $.Lockables $index)}}
-									<span class="poping up" title="{{$.i18n.Tr "repo.settings.lfs_noattribute"}}">{{svg "octicon-alert" 16}}</span>
+									<span data-tooltip-content="{{ctx.Locale.Tr "repo.settings.lfs_noattribute"}}">{{svg "octicon-alert"}}</span>
 								{{end}}
 							</td>
 							<td>
-								<a href="{{AppSubUrl}}/{{$lock.Owner.Name}}">
-									<img class="ui avatar image" src="{{$lock.Owner.RelAvatarLink}}">
+								<a href="{{$lock.Owner.HomeLink}}">
+									{{ctx.AvatarUtils.Avatar $lock.Owner}}
 									{{$lock.Owner.DisplayName}}
 								</a>
 							</td>
-							<td>{{TimeSince .Created $.Lang}}</td>
-							<td class="right aligned">
-								<form action="{{$.LFSFilesLink}}/locks/{{$lock.ID}}/unlock" method="POST">
-									{{$.CsrfTokenHtml}}
-									<button class="ui blue button"><span class="btn-octicon">{{svg "octicon-lock" 16}}</span>{{$.i18n.Tr "repo.settings.lfs_force_unlock"}}</button>
+							<td>{{DateUtils.TimeSince .Created}}</td>
+							<td class="tw-text-right">
+								<form action="{{$.LFSFilesLink}}/locks/{{$lock.ID}}/unlock" method="post">
+									<button type="submit" class="ui primary button">{{svg "octicon-lock"}} {{ctx.Locale.Tr "repo.settings.lfs_force_unlock"}}</button>
 								</form>
 							</td>
 						</tr>
 					{{else}}
 						<tr>
-							<td colspan="4">{{.i18n.Tr "repo.settings.lfs_locks_no_locks"}}</td>
+							<td colspan="4">{{ctx.Locale.Tr "repo.settings.lfs_locks_no_locks"}}</td>
 						</tr>
 					{{end}}
 				</tbody>
@@ -57,5 +51,4 @@
 			{{template "base/paginate" .}}
 		</div>
 	</div>
-</div>
-{{template "base/footer" .}}
+{{template "repo/settings/layout_footer" .}}

@@ -1,208 +1,191 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
-
-// +build bindata
+// SPDX-License-Identifier: MIT
 
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/options"
-	"code.gitea.io/gitea/modules/public"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/templates"
+	"gitea.dev/modules/assetfs"
+	"gitea.dev/modules/glob"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/options"
+	"gitea.dev/modules/public"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/templates"
 
-	"github.com/gobwas/glob"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v3"
 )
 
-// Cmdembedded represents the available extract sub-command.
-var (
-	Cmdembedded = cli.Command{
+var matchedAssetFiles []assetFile
+
+func newEmbeddedCommand() *cli.Command {
+	return &cli.Command{
 		Name:        "embedded",
 		Usage:       "Extract embedded resources",
 		Description: "A command for extracting embedded resources, like templates and images",
-		Subcommands: []cli.Command{
-			subcmdList,
-			subcmdView,
-			subcmdExtract,
+		Commands: []*cli.Command{
+			newEmbeddedListCommand(),
+			newEmbeddedViewCommand(),
+			newEmbeddedExtractCommand(),
 		},
 	}
+}
 
-	subcmdList = cli.Command{
+func newEmbeddedListCommand() *cli.Command {
+	return &cli.Command{
 		Name:   "list",
 		Usage:  "List files matching the given pattern",
 		Action: runList,
 		Flags: []cli.Flag{
-			cli.BoolFlag{
-				Name:  "include-vendored,vendor",
-				Usage: "Include files under public/vendor as well",
+			&cli.BoolFlag{
+				Name:    "include-vendored",
+				Aliases: []string{"vendor"},
+				Usage:   "Include files under public/vendor as well",
 			},
 		},
 	}
+}
 
-	subcmdView = cli.Command{
+func newEmbeddedViewCommand() *cli.Command {
+	return &cli.Command{
 		Name:   "view",
 		Usage:  "View a file matching the given pattern",
 		Action: runView,
 		Flags: []cli.Flag{
-			cli.BoolFlag{
-				Name:  "include-vendored,vendor",
-				Usage: "Include files under public/vendor as well",
+			&cli.BoolFlag{
+				Name:    "include-vendored",
+				Aliases: []string{"vendor"},
+				Usage:   "Include files under public/vendor as well",
 			},
 		},
 	}
+}
 
-	subcmdExtract = cli.Command{
+func newEmbeddedExtractCommand() *cli.Command {
+	return &cli.Command{
 		Name:   "extract",
 		Usage:  "Extract resources",
 		Action: runExtract,
 		Flags: []cli.Flag{
-			cli.BoolFlag{
-				Name:  "include-vendored,vendor",
-				Usage: "Include files under public/vendor as well",
+			&cli.BoolFlag{
+				Name:    "include-vendored",
+				Aliases: []string{"vendor"},
+				Usage:   "Include files under public/vendor as well",
 			},
-			cli.BoolFlag{
+			&cli.BoolFlag{
 				Name:  "overwrite",
 				Usage: "Overwrite files if they already exist",
 			},
-			cli.BoolFlag{
+			&cli.BoolFlag{
 				Name:  "rename",
 				Usage: "Rename files as {name}.bak if they already exist (overwrites previous .bak)",
 			},
-			cli.BoolFlag{
+			&cli.BoolFlag{
 				Name:  "custom",
 				Usage: "Extract to the 'custom' directory as per app.ini",
 			},
-			cli.StringFlag{
-				Name:  "destination,dest-dir",
-				Usage: "Extract to the specified directory",
+			&cli.StringFlag{
+				Name:    "destination",
+				Aliases: []string{"dest-dir"},
+				Usage:   "Extract to the specified directory",
 			},
 		},
 	}
-
-	sections map[string]*section
-	assets   []asset
-)
-
-type section struct {
-	Path  string
-	Names func() []string
-	IsDir func(string) (bool, error)
-	Asset func(string) ([]byte, error)
 }
 
-type asset struct {
-	Section *section
-	Name    string
-	Path    string
+type assetFile struct {
+	fs   *assetfs.LayeredFS
+	name string
+	path string
 }
 
-func initEmbeddedExtractor(c *cli.Context) error {
+func initEmbeddedExtractor(c *cli.Command) error {
+	setupConsoleLogger(log.ERROR, log.CanColorStderr, os.Stderr)
 
-	// Silence the console logger
-	log.DelNamedLogger("console")
-	log.DelNamedLogger(log.DEFAULT)
-
-	// Read configuration file
-	setting.NewContext()
-
-	pats, err := getPatterns(c.Args())
+	patterns, err := compileCollectPatterns(c.Args().Slice())
 	if err != nil {
 		return err
 	}
-	sections := make(map[string]*section, 3)
 
-	sections["public"] = &section{Path: "public", Names: public.AssetNames, IsDir: public.AssetIsDir, Asset: public.Asset}
-	sections["options"] = &section{Path: "options", Names: options.AssetNames, IsDir: options.AssetIsDir, Asset: options.Asset}
-	sections["templates"] = &section{Path: "templates", Names: templates.AssetNames, IsDir: templates.AssetIsDir, Asset: templates.Asset}
-
-	for _, sec := range sections {
-		assets = append(assets, buildAssetList(sec, pats, c)...)
-	}
-
-	// Sort assets
-	sort.SliceStable(assets, func(i, j int) bool {
-		return assets[i].Path < assets[j].Path
-	})
+	collectAssetFilesByPattern(c, patterns, "options", options.BuiltinAssets())
+	collectAssetFilesByPattern(c, patterns, "public", public.BuiltinAssets())
+	collectAssetFilesByPattern(c, patterns, "templates", templates.BuiltinAssets())
 
 	return nil
 }
 
-func runList(c *cli.Context) error {
+func runList(_ context.Context, c *cli.Command) error {
 	if err := runListDo(c); err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "%v\n", err)
 		return err
 	}
 	return nil
 }
 
-func runView(c *cli.Context) error {
+func runView(_ context.Context, c *cli.Command) error {
 	if err := runViewDo(c); err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "%v\n", err)
 		return err
 	}
 	return nil
 }
 
-func runExtract(c *cli.Context) error {
+func runExtract(_ context.Context, c *cli.Command) error {
 	if err := runExtractDo(c); err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "%v\n", err)
 		return err
 	}
 	return nil
 }
 
-func runListDo(c *cli.Context) error {
+func runListDo(c *cli.Command) error {
 	if err := initEmbeddedExtractor(c); err != nil {
 		return err
 	}
 
-	for _, a := range assets {
-		fmt.Println(a.Path)
+	for _, a := range matchedAssetFiles {
+		cprintln(c, a.path)
 	}
 
 	return nil
 }
 
-func runViewDo(c *cli.Context) error {
+func runViewDo(c *cli.Command) error {
 	if err := initEmbeddedExtractor(c); err != nil {
 		return err
 	}
 
-	if len(assets) == 0 {
-		return fmt.Errorf("No files matched the given pattern")
-	} else if len(assets) > 1 {
-		return fmt.Errorf("Too many files matched the given pattern; try to be more specific")
+	if len(matchedAssetFiles) == 0 {
+		return errors.New("no files matched the given pattern")
+	} else if len(matchedAssetFiles) > 1 {
+		return errors.New("too many files matched the given pattern, try to be more specific")
 	}
 
-	data, err := assets[0].Section.Asset(assets[0].Name)
+	data, err := matchedAssetFiles[0].fs.ReadFile(matchedAssetFiles[0].name)
 	if err != nil {
-		return fmt.Errorf("%s: %v", assets[0].Path, err)
+		return fmt.Errorf("%s: %w", matchedAssetFiles[0].path, err)
 	}
 
 	if _, err = os.Stdout.Write(data); err != nil {
-		return fmt.Errorf("%s: %v", assets[0].Path, err)
+		return fmt.Errorf("%s: %w", matchedAssetFiles[0].path, err)
 	}
 
 	return nil
 }
 
-func runExtractDo(c *cli.Context) error {
+func runExtractDo(c *cli.Command) error {
 	if err := initEmbeddedExtractor(c); err != nil {
 		return err
 	}
 
-	if len(c.Args()) == 0 {
-		return fmt.Errorf("A list of pattern of files to extract is mandatory (e.g. '**' for all)")
+	if c.NArg() == 0 {
+		return errors.New("a list of pattern of files to extract is mandatory (e.g. '**' for all)")
 	}
 
 	destdir := "."
@@ -211,7 +194,7 @@ func runExtractDo(c *cli.Context) error {
 		destdir = c.String("destination")
 	} else if c.Bool("custom") {
 		destdir = setting.CustomPath
-		fmt.Println("Using app.ini at", setting.CustomConf)
+		cprintln(c, "Using app.ini at", setting.CustomConf)
 	}
 
 	fi, err := os.Stat(destdir)
@@ -227,105 +210,97 @@ func runExtractDo(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("%s: %s", destdir, err)
 	} else if !fi.IsDir() {
-		return fmt.Errorf("%s is not a directory.", destdir)
+		return fmt.Errorf("destination %q is not a directory", destdir)
 	}
 
-	fmt.Printf("Extracting to %s:\n", destdir)
+	cprintf(c, "Extracting to %s:\n", destdir)
 
 	overwrite := c.Bool("overwrite")
 	rename := c.Bool("rename")
 
-	for _, a := range assets {
-		if err := extractAsset(destdir, a, overwrite, rename); err != nil {
+	for _, a := range matchedAssetFiles {
+		if err := extractAsset(c, destdir, a, overwrite, rename); err != nil {
 			// Non-fatal error
-			fmt.Fprintf(os.Stderr, "%s: %v", a.Path, err)
+			_, _ = fmt.Fprintf(os.Stderr, "%s: %v\n", a.path, err)
 		}
 	}
 
 	return nil
 }
 
-func extractAsset(d string, a asset, overwrite, rename bool) error {
-	dest := filepath.Join(d, filepath.FromSlash(a.Path))
+func extractAsset(c *cli.Command, d string, a assetFile, overwrite, rename bool) error {
+	dest := filepath.Join(d, filepath.FromSlash(a.path))
 	dir := filepath.Dir(dest)
 
-	data, err := a.Section.Asset(a.Name)
+	data, err := a.fs.ReadFile(a.name)
 	if err != nil {
-		return fmt.Errorf("%s: %v", a.Path, err)
+		return fmt.Errorf("%s: %w", a.path, err)
 	}
 
 	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
-		return fmt.Errorf("%s: %v", dir, err)
+		return fmt.Errorf("%s: %w", dir, err)
 	}
 
-	perms := os.ModePerm & 0666
+	perms := os.ModePerm & 0o666
 
 	fi, err := os.Lstat(dest)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("%s: %v", dest, err)
+			return fmt.Errorf("%s: %w", dest, err)
 		}
 	} else if !overwrite && !rename {
-		fmt.Printf("%s already exists; skipped.\n", dest)
+		cprintf(c, "%s already exists; skipped.\n", dest)
 		return nil
 	} else if !fi.Mode().IsRegular() {
 		return fmt.Errorf("%s already exists, but it's not a regular file", dest)
 	} else if rename {
 		if err := os.Rename(dest, dest+".bak"); err != nil {
-			return fmt.Errorf("Error creating backup for %s: %v", dest, err)
+			return fmt.Errorf("error creating backup for %s: %w", dest, err)
 		}
 		// Attempt to respect file permissions mask (even if user:group will be set anew)
 		perms = fi.Mode()
 	}
 
-	file, err := os.OpenFile(dest, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, perms)
-	if err != nil {
-		return fmt.Errorf("%s: %v", dest, err)
-	}
-	defer file.Close()
-
-	if _, err = file.Write(data); err != nil {
-		return fmt.Errorf("%s: %v", dest, err)
+	if err := os.WriteFile(dest, data, perms); err != nil {
+		return fmt.Errorf("%s: %w", dest, err)
 	}
 
-	fmt.Println(dest)
+	cprintln(c, dest)
 
 	return nil
 }
 
-func buildAssetList(sec *section, globs []glob.Glob, c *cli.Context) []asset {
-	var results = make([]asset, 0, 64)
-	for _, name := range sec.Names() {
-		if isdir, err := sec.IsDir(name); !isdir && err == nil {
-			if sec.Path == "public" &&
-				strings.HasPrefix(name, "vendor/") &&
-				!c.Bool("include-vendored") {
-				continue
-			}
-			matchName := sec.Path + "/" + name
-			for _, g := range globs {
-				if g.Match(matchName) {
-					results = append(results, asset{Section: sec,
-						Name: name,
-						Path: sec.Path + "/" + name})
-					break
-				}
+func collectAssetFilesByPattern(c *cli.Command, globs []glob.Glob, path string, layer *assetfs.Layer) {
+	fs := assetfs.Layered(layer)
+	files, err := fs.ListAllFiles(".", true)
+	if err != nil {
+		log.Error("Error listing files in %q: %v", path, err)
+		return
+	}
+	for _, name := range files {
+		if path == "public" &&
+			strings.HasPrefix(name, "vendor/") &&
+			!c.Bool("include-vendored") {
+			continue
+		}
+		matchName := path + "/" + name
+		for _, g := range globs {
+			if g.Match(matchName) {
+				matchedAssetFiles = append(matchedAssetFiles, assetFile{fs: fs, name: name, path: path + "/" + name})
+				break
 			}
 		}
 	}
-	return results
 }
 
-func getPatterns(args []string) ([]glob.Glob, error) {
+func compileCollectPatterns(args []string) (_ []glob.Glob, err error) {
 	if len(args) == 0 {
 		args = []string{"**"}
 	}
 	pat := make([]glob.Glob, len(args))
 	for i := range args {
-		if g, err := glob.Compile(args[i], '/'); err != nil {
-			return nil, fmt.Errorf("'%s': Invalid glob pattern: %v", args[i], err)
-		} else {
-			pat[i] = g
+		if pat[i], err = glob.Compile(args[i], '/'); err != nil {
+			return nil, fmt.Errorf("invalid glob pattern %q: %w", args[i], err)
 		}
 	}
 	return pat, nil

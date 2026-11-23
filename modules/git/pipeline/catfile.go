@@ -1,73 +1,39 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package pipeline
 
 import (
 	"bufio"
-	"bytes"
-	"fmt"
+	"context"
 	"io"
 	"strconv"
 	"strings"
-	"sync"
 
-	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/log"
+	"gitea.dev/modules/git"
+	"gitea.dev/modules/git/gitcmd"
 )
 
 // CatFileBatchCheck runs cat-file with --batch-check
-func CatFileBatchCheck(shasToCheckReader *io.PipeReader, catFileCheckWriter *io.PipeWriter, wg *sync.WaitGroup, tmpBasePath string) {
-	defer wg.Done()
-	defer shasToCheckReader.Close()
-	defer catFileCheckWriter.Close()
-
-	stderr := new(bytes.Buffer)
-	var errbuf strings.Builder
-	cmd := git.NewCommand("cat-file", "--batch-check")
-	if err := cmd.RunInDirFullPipeline(tmpBasePath, catFileCheckWriter, stderr, shasToCheckReader); err != nil {
-		_ = catFileCheckWriter.CloseWithError(fmt.Errorf("git cat-file --batch-check [%s]: %v - %s", tmpBasePath, err, errbuf.String()))
-	}
+func CatFileBatchCheck(ctx context.Context, cmd *gitcmd.Command, repo git.RepositoryFacade) error {
+	cmd.AddArguments("cat-file", "--batch-check")
+	return cmd.WithRepo(repo).RunWithStderr(ctx)
 }
 
 // CatFileBatchCheckAllObjects runs cat-file with --batch-check --batch-all
-func CatFileBatchCheckAllObjects(catFileCheckWriter *io.PipeWriter, wg *sync.WaitGroup, tmpBasePath string, errChan chan<- error) {
-	defer wg.Done()
-	defer catFileCheckWriter.Close()
-
-	stderr := new(bytes.Buffer)
-	var errbuf strings.Builder
-	cmd := git.NewCommand("cat-file", "--batch-check", "--batch-all-objects")
-	if err := cmd.RunInDirPipeline(tmpBasePath, catFileCheckWriter, stderr); err != nil {
-		log.Error("git cat-file --batch-check --batch-all-object [%s]: %v - %s", tmpBasePath, err, errbuf.String())
-		err = fmt.Errorf("git cat-file --batch-check --batch-all-object [%s]: %v - %s", tmpBasePath, err, errbuf.String())
-		_ = catFileCheckWriter.CloseWithError(err)
-		errChan <- err
-	}
+func CatFileBatchCheckAllObjects(ctx context.Context, cmd *gitcmd.Command, repo git.RepositoryFacade) error {
+	return cmd.AddArguments("cat-file", "--batch-check", "--batch-all-objects").WithRepo(repo).RunWithStderr(ctx)
 }
 
 // CatFileBatch runs cat-file --batch
-func CatFileBatch(shasToBatchReader *io.PipeReader, catFileBatchWriter *io.PipeWriter, wg *sync.WaitGroup, tmpBasePath string) {
-	defer wg.Done()
-	defer shasToBatchReader.Close()
-	defer catFileBatchWriter.Close()
-
-	stderr := new(bytes.Buffer)
-	var errbuf strings.Builder
-	if err := git.NewCommand("cat-file", "--batch").RunInDirFullPipeline(tmpBasePath, catFileBatchWriter, stderr, shasToBatchReader); err != nil {
-		_ = shasToBatchReader.CloseWithError(fmt.Errorf("git rev-list [%s]: %v - %s", tmpBasePath, err, errbuf.String()))
-	}
+func CatFileBatch(ctx context.Context, cmd *gitcmd.Command, repo git.RepositoryFacade) error {
+	return cmd.AddArguments("cat-file", "--batch").WithRepo(repo).RunWithStderr(ctx)
 }
 
 // BlobsLessThan1024FromCatFileBatchCheck reads a pipeline from cat-file --batch-check and returns the blobs <1024 in size
-func BlobsLessThan1024FromCatFileBatchCheck(catFileCheckReader *io.PipeReader, shasToBatchWriter *io.PipeWriter, wg *sync.WaitGroup) {
-	defer wg.Done()
-	defer catFileCheckReader.Close()
-	scanner := bufio.NewScanner(catFileCheckReader)
-	defer func() {
-		_ = shasToBatchWriter.CloseWithError(scanner.Err())
-	}()
+func BlobsLessThan1024FromCatFileBatchCheck(in io.ReadCloser, out io.WriteCloser) error {
+	defer out.Close()
+	scanner := bufio.NewScanner(in)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if len(line) == 0 {
@@ -83,12 +49,12 @@ func BlobsLessThan1024FromCatFileBatchCheck(catFileCheckReader *io.PipeReader, s
 		}
 		toWrite := []byte(fields[0] + "\n")
 		for len(toWrite) > 0 {
-			n, err := shasToBatchWriter.Write(toWrite)
+			n, err := out.Write(toWrite)
 			if err != nil {
-				_ = catFileCheckReader.CloseWithError(err)
-				break
+				return err
 			}
 			toWrite = toWrite[n:]
 		}
 	}
+	return scanner.Err()
 }

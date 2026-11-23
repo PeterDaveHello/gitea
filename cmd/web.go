@@ -1,6 +1,5 @@
 // Copyright 2014 The Gogs Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package cmd
 
@@ -9,45 +8,77 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	_ "net/http/pprof" // Used for debugging if enabled and a web server is running
+	"net/http/pprof"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
-	"code.gitea.io/gitea/modules/graceful"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/routers"
-	"code.gitea.io/gitea/routers/routes"
+	audit_model "gitea.dev/models/audit"
+	"gitea.dev/modules/container"
+	"gitea.dev/modules/graceful"
+	"gitea.dev/modules/gtprof"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/process"
+	"gitea.dev/modules/public"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/templates"
+	"gitea.dev/modules/util"
+	"gitea.dev/routers"
+	"gitea.dev/routers/install"
+	"gitea.dev/services/audit"
 
-	context2 "github.com/gorilla/context"
-	"github.com/unknwon/com"
-	"github.com/urfave/cli"
-	"golang.org/x/crypto/acme/autocert"
-	ini "gopkg.in/ini.v1"
+	"github.com/felixge/fgprof"
+	"github.com/urfave/cli/v3"
 )
 
-// CmdWeb represents the available web sub-command.
-var CmdWeb = cli.Command{
-	Name:  "web",
-	Usage: "Start Gitea web server",
-	Description: `Gitea web server is the only thing you need to run,
+// PIDFile could be set from build tag
+var PIDFile = "/run/gitea.pid"
+
+func newWebCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "web",
+		Usage: "Start Gitea web server",
+		Description: `Gitea web server is the only thing you need to run,
 and it takes care of all the other things for you`,
-	Action: runWeb,
-	Flags: []cli.Flag{
-		cli.StringFlag{
-			Name:  "port, p",
-			Value: "3000",
-			Usage: "Temporary port number to prevent conflict",
+		Before: PrepareConsoleLoggerLevel(log.INFO),
+		Action: runWeb,
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:    "port",
+				Aliases: []string{"p"},
+				Value:   "3000",
+				Usage:   "Temporary port number to prevent conflict",
+			},
+			&cli.StringFlag{
+				Name:  "install-port",
+				Value: "3000",
+				Usage: "Temporary port number to run the install page on to prevent conflict",
+			},
+			&cli.StringFlag{
+				Name:    "pid",
+				Aliases: []string{"P"},
+				Value:   PIDFile,
+				Usage:   "Custom pid file path",
+			},
+			&cli.BoolFlag{
+				Name:    "quiet",
+				Aliases: []string{"q"},
+				Usage:   "Only display Fatal logging errors until logging is set-up",
+			},
+			&cli.BoolFlag{
+				Name:  "verbose",
+				Usage: "Set initial logging to TRACE level until logging is properly set-up",
+			},
 		},
-		cli.StringFlag{
-			Name:  "pid, P",
-			Value: setting.PIDFile,
-			Usage: "Custom pid file path",
-		},
-	},
+	}
 }
 
 func runHTTPRedirector() {
+	_, _, finished := process.GetManager().AddTypedContext(graceful.GetManager().HammerContext(), "Web: HTTP Redirector", process.SystemProcessType, true)
+	defer finished()
+
 	source := fmt.Sprintf("%s:%s", setting.HTTPAddr, setting.PortToRedirect)
 	dest := strings.TrimSuffix(setting.AppURL, "/")
 	log.Info("Redirecting: %s to %s", source, dest)
@@ -60,47 +91,177 @@ func runHTTPRedirector() {
 		http.Redirect(w, r, target, http.StatusTemporaryRedirect)
 	})
 
-	var err = runHTTP("tcp", source, context2.ClearHandler(handler))
-
+	err := runHTTP("tcp", source, "HTTP Redirector", handler, setting.RedirectorUseProxyProtocol)
 	if err != nil {
 		log.Fatal("Failed to start port redirection: %v", err)
 	}
 }
 
-func runLetsEncrypt(listenAddr, domain, directory, email string, m http.Handler) error {
-	certManager := autocert.Manager{
-		Prompt:     autocert.AcceptTOS,
-		HostPolicy: autocert.HostWhitelist(domain),
-		Cache:      autocert.DirCache(directory),
-		Email:      email,
+func createPIDFile(pidPath string) {
+	currentPid := os.Getpid()
+	if err := os.MkdirAll(filepath.Dir(pidPath), os.ModePerm); err != nil {
+		log.Fatal("Failed to create PID folder: %v", err)
 	}
-	go func() {
-		log.Info("Running Let's Encrypt handler on %s", setting.HTTPAddr+":"+setting.PortToRedirect)
-		// all traffic coming into HTTP will be redirect to HTTPS automatically (LE HTTP-01 validation happens here)
-		var err = runHTTP("tcp", setting.HTTPAddr+":"+setting.PortToRedirect, certManager.HTTPHandler(http.HandlerFunc(runLetsEncryptFallbackHandler)))
-		if err != nil {
-			log.Fatal("Failed to start the Let's Encrypt handler on port %s: %v", setting.PortToRedirect, err)
+
+	file, err := os.Create(pidPath)
+	if err != nil {
+		log.Fatal("Failed to create PID file: %v", err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString(strconv.FormatInt(int64(currentPid), 10)); err != nil {
+		log.Fatal("Failed to write PID information: %v", err)
+	}
+}
+
+func showWebStartupMessage(msg string) {
+	log.Info("Gitea version: %s%s", setting.AppVer, setting.AppBuiltWith)
+	log.Info("* RunMode: %s", setting.RunMode)
+	log.Info("* AppPath: %s", setting.AppPath)
+	log.Info("* WorkPath: %s", setting.AppWorkPath)
+	log.Info("* CustomPath: %s", setting.CustomPath)
+	log.Info("* ConfigFile: %s", setting.CustomConf)
+	log.Info("%s", msg) // show startup message
+
+	if setting.CORSConfig.Enabled {
+		log.Info("CORS Service Enabled")
+	}
+	if setting.DefaultUILocation != time.Local {
+		log.Info("Default UI Location is %v", setting.DefaultUILocation.String())
+	}
+	if setting.MailService != nil {
+		log.Info("Mail Service Enabled: RegisterEmailConfirm=%v, Service.EnableNotifyMail=%v", setting.Service.RegisterEmailConfirm, setting.Service.EnableNotifyMail)
+	}
+}
+
+func serveInstall(cmd *cli.Command) error {
+	showWebStartupMessage("Prepare to run install page")
+
+	routers.InitWebInstallPage(graceful.GetManager().HammerContext())
+
+	// Flag for port number in case first time run conflict
+	if cmd.IsSet("port") {
+		if err := setPort(cmd.String("port")); err != nil {
+			return err
 		}
-	}()
-	return runHTTPSWithTLSConfig("tcp", listenAddr, certManager.TLSConfig(), context2.ClearHandler(m))
-}
-
-func runLetsEncryptFallbackHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" && r.Method != "HEAD" {
-		http.Error(w, "Use HTTPS", http.StatusBadRequest)
-		return
 	}
-	// Remove the trailing slash at the end of setting.AppURL, the request
-	// URI always contains a leading slash, which would result in a double
-	// slash
-	target := strings.TrimRight(setting.AppURL, "/") + r.URL.RequestURI()
-	http.Redirect(w, r, target, http.StatusFound)
+	if cmd.IsSet("install-port") {
+		if err := setPort(cmd.String("install-port")); err != nil {
+			return err
+		}
+	}
+	c := install.Routes()
+	err := listen(c, false)
+	if err != nil {
+		log.Error("Unable to open listener for installer. Is Gitea already running?")
+		graceful.GetManager().DoGracefulShutdown()
+	}
+	select {
+	case <-graceful.GetManager().IsShutdown():
+		<-graceful.GetManager().Done()
+		log.Info("PID: %d Gitea Web Finished", os.Getpid())
+		return err
+	default:
+	}
+	return nil
 }
 
-func runWeb(ctx *cli.Context) error {
-	managerCtx, cancel := context.WithCancel(context.Background())
-	graceful.InitManager(managerCtx)
-	defer cancel()
+func serveInstalled(c *cli.Command) error {
+	setting.MustInstalled()
+
+	showWebStartupMessage("Prepare to run web server")
+
+	if setting.AppWorkPathMismatch {
+		log.Error("WORK_PATH from config %q doesn't match other paths from environment variables or command arguments. "+
+			"Only WORK_PATH in config should be set and used. Please make sure the path in config file is correct, "+
+			"remove the other outdated work paths from environment variables and command arguments", setting.CustomConf)
+	}
+
+	rootCfg := setting.CfgProvider
+	if rootCfg.Section("").Key("WORK_PATH").String() == "" {
+		saveCfg, err := rootCfg.PrepareSaving()
+		if err != nil {
+			log.Error("Unable to prepare saving WORK_PATH=%s to config %q: %v\nYou should set it manually, otherwise there might be bugs when accessing the git repositories.", setting.AppWorkPath, setting.CustomConf, err)
+		} else {
+			rootCfg.Section("").Key("WORK_PATH").SetValue(setting.AppWorkPath)
+			saveCfg.Section("").Key("WORK_PATH").SetValue(setting.AppWorkPath)
+			if err = saveCfg.Save(); err != nil {
+				log.Error("Unable to update WORK_PATH=%s to config %q: %v\nYou should set it manually, otherwise there might be bugs when accessing the git repositories.", setting.AppWorkPath, setting.CustomConf, err)
+			}
+		}
+	}
+
+	// in old versions, user's custom web files are placed in "custom/public", and they were served as "http://domain.com/assets/xxx"
+	// now, Gitea only serves pre-defined files in the "custom/public" folder basing on the web root, the user should move their custom files to "custom/public/assets"
+	publicFiles, _ := public.AssetFS().ListFiles(".")
+	publicFilesSet := container.SetOf(publicFiles...)
+	publicFilesSet.Remove(".well-known")
+	publicFilesSet.Remove("assets")
+	publicFilesSet.Remove("robots.txt")
+	for _, fn := range publicFilesSet.Values() {
+		log.Error("Found legacy public asset %q in CustomPath. Please move it to %s/public/assets/%s", fn, setting.CustomPath, fn)
+	}
+	if _, err := os.Stat(filepath.Join(setting.CustomPath, "robots.txt")); err == nil {
+		log.Error(`Found legacy public asset "robots.txt" in CustomPath. Please move it to %s/public/robots.txt`, setting.CustomPath)
+	}
+
+	routers.InitWebInstalled(graceful.GetManager().HammerContext())
+
+	// We check that AppDataPath exists here (it should have been created during installation)
+	// We can't check it in `InitWebInstalled`, because some integration tests
+	// use cmd -> InitWebInstalled, but the AppDataPath doesn't exist during those tests.
+	if _, err := os.Stat(setting.AppDataPath); err != nil {
+		log.Fatal("Can not find APP_DATA_PATH %q", setting.AppDataPath)
+	}
+
+	// the AppDataTempDir is fully managed by us with a safe sub-path
+	// so it's safe to automatically remove the outdated files
+	setting.AppDataTempDir("").RemoveOutdated(3 * 24 * time.Hour)
+
+	// Override the provided port number within the configuration
+	if c.IsSet("port") {
+		if err := setPort(c.String("port")); err != nil {
+			return err
+		}
+	}
+
+	gtprof.EnableBuiltinTracer(util.Iif(setting.IsProd, 2000*time.Millisecond, 100*time.Millisecond))
+
+	// Set up Chi routes
+	webRoutes := routers.NormalRoutes()
+
+	auditCtx := audit.WithCLIDoer(context.Background())
+	log.Info("Audit record output: %s", setting.Audit.RecordOutput)
+	audit.Record(auditCtx, audit_model.SystemStartup, nil, "version", setting.AppVer)
+
+	err := listen(webRoutes, true)
+
+	audit.Record(auditCtx, audit_model.SystemShutdown, nil)
+	<-graceful.GetManager().Done()
+	log.Info("PID: %d Gitea Web Finished", os.Getpid())
+	return err
+}
+
+func servePprof() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/debug/fgprof", fgprof.Handler())
+	// FIXME: it should use a proper context
+	_, _, finished := process.GetManager().AddTypedContext(context.TODO(), "Web: PProf Server", process.SystemProcessType, true)
+	// The pprof server is for debug purpose only, it shouldn't be exposed on public network. At the moment, it's not worth introducing a configurable option for it.
+	log.Info("Starting pprof server on localhost:6060")
+	server := &http.Server{Addr: "localhost:6060", Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	log.Info("Stopped pprof server: %v", server.ListenAndServe())
+	finished()
+}
+
+func runWeb(_ context.Context, cmd *cli.Command) error {
+	if subCmdName, valid := isValidDefaultSubCommand(cmd); !valid {
+		return fmt.Errorf("unknown command: %s", subCmdName)
+	}
 
 	if os.Getppid() > 1 && len(os.Getenv("LISTEN_FDS")) > 0 {
 		log.Info("Restarting Gitea on PID: %d from parent PID: %d", os.Getpid(), os.Getppid())
@@ -109,105 +270,119 @@ func runWeb(ctx *cli.Context) error {
 	}
 
 	// Set pid file setting
-	if ctx.IsSet("pid") {
-		setting.PIDFile = ctx.String("pid")
-		setting.WritePIDFile = true
+	if cmd.IsSet("pid") {
+		createPIDFile(cmd.String("pid"))
 	}
 
-	// Perform global initialization
-	routers.GlobalInit(graceful.GetManager().HammerContext())
+	// init the HTML renderer and load templates, if error happens, it will report the error immediately and exit with error log
+	// in dev mode, it won't exit, but watch the template files for changes
+	_ = templates.PageRenderer()
 
-	// Set up Macaron
-	m := routes.NewMacaron()
-	routes.RegisterRoutes(m)
+	if !setting.InstallLock {
+		if err := serveInstall(cmd); err != nil {
+			return err
+		}
+	} else {
+		NoInstallListener()
+	}
 
-	// Flag for port number in case first time run conflict.
-	if ctx.IsSet("port") {
-		setting.AppURL = strings.Replace(setting.AppURL, setting.HTTPPort, ctx.String("port"), 1)
-		setting.HTTPPort = ctx.String("port")
+	if setting.EnablePprof {
+		go servePprof()
+	}
 
-		switch setting.Protocol {
-		case setting.UnixSocket:
-		case setting.FCGI:
-		case setting.FCGIUnix:
-		default:
-			// Save LOCAL_ROOT_URL if port changed
-			cfg := ini.Empty()
-			if com.IsFile(setting.CustomConf) {
-				// Keeps custom settings if there is already something.
-				if err := cfg.Append(setting.CustomConf); err != nil {
-					return fmt.Errorf("Failed to load custom conf '%s': %v", setting.CustomConf, err)
-				}
-			}
+	return serveInstalled(cmd)
+}
 
-			defaultLocalURL := string(setting.Protocol) + "://"
-			if setting.HTTPAddr == "0.0.0.0" {
-				defaultLocalURL += "localhost"
-			} else {
-				defaultLocalURL += setting.HTTPAddr
-			}
-			defaultLocalURL += ":" + setting.HTTPPort + "/"
+func setPort(port string) error {
+	setting.AppURL = strings.Replace(setting.AppURL, setting.HTTPPort, port, 1)
+	setting.HTTPPort = port
 
-			cfg.Section("server").Key("LOCAL_ROOT_URL").SetValue(defaultLocalURL)
+	switch setting.Protocol {
+	case setting.HTTPUnix:
+	case setting.FCGI:
+	case setting.FCGIUnix:
+	default:
+		defaultLocalURL := string(setting.Protocol) + "://"
+		if setting.HTTPAddr == "0.0.0.0" {
+			defaultLocalURL += "localhost"
+		} else {
+			defaultLocalURL += setting.HTTPAddr
+		}
+		defaultLocalURL += ":" + setting.HTTPPort + "/"
 
-			if err := cfg.SaveTo(setting.CustomConf); err != nil {
-				return fmt.Errorf("Error saving generated JWT Secret to custom config: %v", err)
-			}
+		// Save LOCAL_ROOT_URL if port changed
+		rootCfg := setting.CfgProvider
+		saveCfg, err := rootCfg.PrepareSaving()
+		if err != nil {
+			return fmt.Errorf("failed to save config file: %v", err)
+		}
+		rootCfg.Section("server").Key("LOCAL_ROOT_URL").SetValue(defaultLocalURL)
+		saveCfg.Section("server").Key("LOCAL_ROOT_URL").SetValue(defaultLocalURL)
+		if err = saveCfg.Save(); err != nil {
+			return fmt.Errorf("failed to save config file: %v", err)
 		}
 	}
+	return nil
+}
 
+func listen(m http.Handler, handleRedirector bool) error {
 	listenAddr := setting.HTTPAddr
-	if setting.Protocol != setting.UnixSocket && setting.Protocol != setting.FCGIUnix {
+	if setting.Protocol != setting.HTTPUnix && setting.Protocol != setting.FCGIUnix {
 		listenAddr = net.JoinHostPort(listenAddr, setting.HTTPPort)
 	}
+	_, _, finished := process.GetManager().AddTypedContext(graceful.GetManager().HammerContext(), "Web: Gitea Server", process.SystemProcessType, true)
+	defer finished()
 	log.Info("Listen: %v://%s%s", setting.Protocol, listenAddr, setting.AppSubURL)
+	// This can be useful for users, many users do wrong to their config and get strange behaviors behind a reverse-proxy.
+	// A user may fix the configuration mistake when he sees this log.
+	// And this is also very helpful to maintainers to provide help to users to resolve their configuration problems.
+	log.Info("AppURL(ROOT_URL): %s", setting.AppURL)
 
 	if setting.LFS.StartServer {
 		log.Info("LFS server enabled")
 	}
 
-	if setting.EnablePprof {
-		go func() {
-			log.Info("Starting pprof server on localhost:6060")
-			log.Info("%v", http.ListenAndServe("localhost:6060", nil))
-		}()
-	}
-
 	var err error
 	switch setting.Protocol {
 	case setting.HTTP:
-		NoHTTPRedirector()
-		err = runHTTP("tcp", listenAddr, context2.ClearHandler(m))
-	case setting.HTTPS:
-		if setting.EnableLetsEncrypt {
-			err = runLetsEncrypt(listenAddr, setting.Domain, setting.LetsEncryptDirectory, setting.LetsEncryptEmail, context2.ClearHandler(m))
-			break
-		}
-		if setting.RedirectOtherPort {
-			go runHTTPRedirector()
-		} else {
+		if handleRedirector {
 			NoHTTPRedirector()
 		}
-		err = runHTTPS("tcp", listenAddr, setting.CertFile, setting.KeyFile, context2.ClearHandler(m))
+		err = runHTTP("tcp", listenAddr, "Web", m, setting.UseProxyProtocol)
+	case setting.HTTPS:
+		if setting.EnableAcme {
+			err = runACME(listenAddr, m)
+			break
+		}
+		if handleRedirector {
+			if setting.RedirectOtherPort {
+				go runHTTPRedirector()
+			} else {
+				NoHTTPRedirector()
+			}
+		}
+		err = runHTTPS("tcp", listenAddr, "Web", setting.CertFile, setting.KeyFile, m, setting.UseProxyProtocol, setting.ProxyProtocolTLSBridging)
 	case setting.FCGI:
-		NoHTTPRedirector()
-		err = runFCGI("tcp", listenAddr, context2.ClearHandler(m))
-	case setting.UnixSocket:
-		NoHTTPRedirector()
-		err = runHTTP("unix", listenAddr, context2.ClearHandler(m))
+		if handleRedirector {
+			NoHTTPRedirector()
+		}
+		err = runFCGI("tcp", listenAddr, "FCGI Web", m, setting.UseProxyProtocol)
+	case setting.HTTPUnix:
+		if handleRedirector {
+			NoHTTPRedirector()
+		}
+		err = runHTTP("unix", listenAddr, "Web", m, setting.UseProxyProtocol)
 	case setting.FCGIUnix:
-		NoHTTPRedirector()
-		err = runFCGI("unix", listenAddr, context2.ClearHandler(m))
+		if handleRedirector {
+			NoHTTPRedirector()
+		}
+		err = runFCGI("unix", listenAddr, "Web", m, setting.UseProxyProtocol)
 	default:
 		log.Fatal("Invalid protocol: %s", setting.Protocol)
 	}
-
 	if err != nil {
-		log.Critical("Failed to start server: %v", err)
+		log.Error("Failed to start server: %v", err)
 	}
 	log.Info("HTTP Listener: %s Closed", listenAddr)
-	<-graceful.GetManager().Done()
-	log.Info("PID: %d Gitea Web Finished", os.Getpid())
-	log.Close()
-	return nil
+	return err
 }

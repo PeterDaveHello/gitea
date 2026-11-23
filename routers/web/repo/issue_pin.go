@@ -1,0 +1,116 @@
+// Copyright 2023 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
+package repo
+
+import (
+	"net/http"
+
+	"gitea.dev/models/db"
+	issues_model "gitea.dev/models/issues"
+	"gitea.dev/modules/jsonlimit"
+	"gitea.dev/modules/log"
+	"gitea.dev/services/context"
+)
+
+// IssuePinOrUnpin pin or unpin a Issue
+func IssuePinOrUnpin(ctx *context.Context) {
+	issue := GetActionIssue(ctx)
+	if ctx.Written() {
+		return
+	}
+
+	// If we don't do this, it will crash when trying to add the pin event to the comment history
+	err := issue.LoadRepo(ctx)
+	if err != nil {
+		ctx.ServerErrorAuto(err)
+		return
+	}
+
+	// PinOrUnpin pins or unpins a Issue
+	_, err = issues_model.GetIssuePin(ctx, issue)
+	if err != nil && !db.IsErrNotExist(err) {
+		ctx.ServerErrorAuto(err)
+		return
+	}
+
+	if db.IsErrNotExist(err) {
+		err = issues_model.PinIssue(ctx, issue, ctx.Doer)
+	} else {
+		err = issues_model.UnpinIssue(ctx, issue, ctx.Doer)
+	}
+
+	if err != nil {
+		if issues_model.IsErrIssueMaxPinReached(err) {
+			ctx.JSONError(ctx.Tr("repo.issues.max_pinned"))
+		} else {
+			ctx.ServerErrorAuto(err)
+		}
+		return
+	}
+
+	ctx.JSONRedirect(issue.Link())
+}
+
+// IssueUnpin unpins a Issue
+func IssueUnpin(ctx *context.Context) {
+	issue, err := issues_model.GetIssueByIndex(ctx, ctx.Repo.Repository.ID, ctx.PathParamInt64("index"))
+	if err != nil {
+		ctx.ServerErrorAuto(err)
+		return
+	}
+
+	// If we don't do this, it will crash when trying to add the pin event to the comment history
+	err = issue.LoadRepo(ctx)
+	if err != nil {
+		ctx.ServerErrorAuto(err)
+		return
+	}
+
+	err = issues_model.UnpinIssue(ctx, issue, ctx.Doer)
+	if err != nil {
+		ctx.ServerErrorAuto(err)
+		return
+	}
+
+	ctx.Status(http.StatusNoContent)
+}
+
+// IssuePinMove moves a pinned Issue
+func IssuePinMove(ctx *context.Context) {
+	if ctx.Doer == nil {
+		ctx.JSON(http.StatusForbidden, "Only signed in users are allowed to perform this action.")
+		return
+	}
+
+	type movePinIssueForm struct {
+		ID       int64 `json:"id"`
+		Position int   `json:"position"`
+	}
+
+	form := &movePinIssueForm{}
+	if err := jsonlimit.DecodeFromRequest(ctx.Resp, ctx.Req, 10*1024*1024, &form); err != nil {
+		ctx.JSONError("invalid request body")
+		return
+	}
+
+	issue, err := issues_model.GetIssueByID(ctx, form.ID)
+	if err != nil {
+		ctx.ServerErrorAuto(err)
+		return
+	}
+
+	if issue.RepoID != ctx.Repo.Repository.ID {
+		ctx.Status(http.StatusNotFound)
+		log.Error("Issue does not belong to this repository")
+		return
+	}
+
+	err = issues_model.MovePin(ctx, issue, form.Position)
+	if err != nil {
+		ctx.ServerErrorAuto(err)
+		return
+	}
+
+	ctx.Status(http.StatusNoContent)
+}

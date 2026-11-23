@@ -1,110 +1,155 @@
 // Copyright 2015 The Gogs Authors. All rights reserved.
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package git
 
 import (
 	"bytes"
-	"fmt"
+	"context"
+	"io"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/mcuadros/go-version"
+	"gitea.dev/modules/git/gitcmd"
 )
-
-func (repo *Repository) getTree(id SHA1) (*Tree, error) {
-	gogitTree, err := repo.gogitRepo.TreeObject(id)
-	if err != nil {
-		return nil, err
-	}
-
-	tree := NewTree(repo, id)
-	tree.gogitTree = gogitTree
-	return tree, nil
-}
-
-// GetTree find the tree object in the repository.
-func (repo *Repository) GetTree(idStr string) (*Tree, error) {
-	if len(idStr) != 40 {
-		res, err := NewCommand("rev-parse", "--verify", idStr).RunInDir(repo.Path)
-		if err != nil {
-			return nil, err
-		}
-		if len(res) > 0 {
-			idStr = res[:len(res)-1]
-		}
-	}
-	id, err := NewIDFromString(idStr)
-	if err != nil {
-		return nil, err
-	}
-	resolvedID := id
-	commitObject, err := repo.gogitRepo.CommitObject(id)
-	if err == nil {
-		id = SHA1(commitObject.TreeHash)
-	}
-	treeObject, err := repo.getTree(id)
-	if err != nil {
-		return nil, err
-	}
-	treeObject.ResolvedID = resolvedID
-	return treeObject, nil
-}
 
 // CommitTreeOpts represents the possible options to CommitTree
 type CommitTreeOpts struct {
 	Parents    []string
 	Message    string
-	KeyID      string
+	Key        *SigningKey
 	NoGPGSign  bool
 	AlwaysSign bool
 }
 
 // CommitTree creates a commit from a given tree id for the user with provided message
-func (repo *Repository) CommitTree(sig *Signature, tree *Tree, opts CommitTreeOpts) (SHA1, error) {
-	binVersion, err := BinVersion()
-	if err != nil {
-		return SHA1{}, err
-	}
-
+func (repo *Repository) CommitTree(ctx context.Context, author, committer *Signature, tree *Tree, opts CommitTreeOpts) (ObjectID, error) {
 	commitTimeStr := time.Now().Format(time.RFC3339)
 
 	// Because this may call hooks we should pass in the environment
 	env := append(os.Environ(),
-		"GIT_AUTHOR_NAME="+sig.Name,
-		"GIT_AUTHOR_EMAIL="+sig.Email,
+		"GIT_AUTHOR_NAME="+author.Name,
+		"GIT_AUTHOR_EMAIL="+author.Email,
 		"GIT_AUTHOR_DATE="+commitTimeStr,
-		"GIT_COMMITTER_NAME="+sig.Name,
-		"GIT_COMMITTER_EMAIL="+sig.Email,
+		"GIT_COMMITTER_NAME="+committer.Name,
+		"GIT_COMMITTER_EMAIL="+committer.Email,
 		"GIT_COMMITTER_DATE="+commitTimeStr,
 	)
-	cmd := NewCommand("commit-tree", tree.ID.String())
+	cmd := gitcmd.NewCommand("commit-tree").AddDynamicArguments(tree.ID.String())
 
 	for _, parent := range opts.Parents {
-		cmd.AddArguments("-p", parent)
+		cmd.AddArguments("-p").AddDynamicArguments(parent)
 	}
 
 	messageBytes := new(bytes.Buffer)
 	_, _ = messageBytes.WriteString(opts.Message)
 	_, _ = messageBytes.WriteString("\n")
 
-	if version.Compare(binVersion, "1.7.9", ">=") && (opts.KeyID != "" || opts.AlwaysSign) {
-		cmd.AddArguments(fmt.Sprintf("-S%s", opts.KeyID))
+	if opts.Key != nil {
+		if opts.Key.Format != "" {
+			cmd.AddConfig("gpg.format", opts.Key.Format)
+		}
+		cmd.AddOptionFormat("-S%s", opts.Key.KeyID)
+	} else if opts.AlwaysSign {
+		cmd.AddOptionFormat("-S")
 	}
 
-	if version.Compare(binVersion, "2.0.0", ">=") && opts.NoGPGSign {
+	if opts.NoGPGSign {
 		cmd.AddArguments("--no-gpg-sign")
 	}
 
-	stdout := new(bytes.Buffer)
-	stderr := new(bytes.Buffer)
-	err = cmd.RunInDirTimeoutEnvFullPipeline(env, -1, repo.Path, stdout, stderr, messageBytes)
-
+	stdout, _, err := cmd.WithEnv(env).
+		WithRepo(repo).
+		WithStdinBytes(messageBytes.Bytes()).
+		RunStdString(ctx)
 	if err != nil {
-		return SHA1{}, concatenateError(err, stderr.String())
+		return nil, err
 	}
-	return NewIDFromString(strings.TrimSpace(stdout.String()))
+	return NewIDFromString(strings.TrimSpace(stdout))
+}
+
+func (repo *Repository) getTree(ctx context.Context, id ObjectID) (*Tree, error) {
+	batch, cancel, err := repo.CatFileBatch()
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+
+	info, rd, err := batch.QueryContent(id.String())
+	if err != nil {
+		return nil, err
+	}
+
+	switch info.Type {
+	case "tag":
+		data, err := io.ReadAll(io.LimitReader(rd, info.Size))
+		if err != nil {
+			return nil, err
+		}
+		tag, err := parseTagData(id.Type(), data)
+		if err != nil {
+			return nil, err
+		}
+
+		commit, err := repo.getCommitWithBatch(batch, tag.Object)
+		if err != nil {
+			return nil, err
+		}
+		tree := commit.Tree()
+		return tree, nil
+	case "commit":
+		commit, err := CommitFromReader(id, io.LimitReader(rd, info.Size))
+		if err != nil {
+			return nil, err
+		}
+		if _, err := rd.Discard(1); err != nil {
+			return nil, err
+		}
+		tree := commit.Tree()
+		return tree, nil
+	case "tree":
+		tree := newTree(id)
+		objectFormat, err := repo.GetObjectFormat(ctx)
+		if err != nil {
+			return nil, err
+		}
+		tree.entries, err = catBatchParseTreeEntries(objectFormat, tree, rd, info.Size)
+		if err != nil {
+			return nil, err
+		}
+		tree.entriesParsed = true
+		return tree, nil
+	default:
+		if err := DiscardFull(rd, info.Size+1); err != nil {
+			return nil, err
+		}
+		return nil, ErrNotExist{
+			ID: id.String(),
+		}
+	}
+}
+
+// GetTree find the tree object in the repository.
+func (repo *Repository) GetTree(ctx context.Context, idStr string) (*Tree, error) {
+	objectFormat, err := repo.GetObjectFormat(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(idStr) != objectFormat.FullLength() {
+		res, err := repo.GetRefCommitID(ctx, idStr)
+		if err != nil {
+			return nil, err
+		}
+		if len(res) > 0 {
+			idStr = res
+		}
+	}
+	id, err := NewIDFromString(idStr)
+	if err != nil {
+		return nil, err
+	}
+
+	return repo.getTree(ctx, id)
 }

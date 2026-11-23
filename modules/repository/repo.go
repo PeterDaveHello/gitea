@@ -1,276 +1,322 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package repository
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"path"
+	"io"
 	"strings"
-	"time"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/modules/timeutil"
-	"code.gitea.io/gitea/modules/util"
-
-	"gopkg.in/ini.v1"
+	"gitea.dev/models/db"
+	git_model "gitea.dev/models/git"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/modules/git"
+	"gitea.dev/modules/lfs"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/timeutil"
+	"gitea.dev/modules/util"
 )
 
 /*
-	GitHub, GitLab, Gogs: *.wiki.git
-	BitBucket: *.git/wiki
+GitHub, GitLab, Gogs: *.wiki.git
+BitBucket: *.git/wiki
 */
 var commonWikiURLSuffixes = []string{".wiki.git", ".git/wiki"}
 
 // WikiRemoteURL returns accessible repository URL for wiki if exists.
 // Otherwise, it returns an empty string.
-func WikiRemoteURL(remote string) string {
+func WikiRemoteURL(ctx context.Context, remote string) string {
 	remote = strings.TrimSuffix(remote, ".git")
 	for _, suffix := range commonWikiURLSuffixes {
 		wikiURL := remote + suffix
-		if git.IsRepoURLAccessible(wikiURL) {
+		if git.IsRepoURLAccessible(ctx, wikiURL) {
 			return wikiURL
 		}
 	}
 	return ""
 }
 
-// MigrateRepositoryGitData starts migrating git related data after created migrating repository
-func MigrateRepositoryGitData(doer, u *models.User, repo *models.Repository, opts api.MigrateRepoOption) (*models.Repository, error) {
-	repoPath := models.RepoPath(u.Name, opts.RepoName)
-
-	if u.IsOrganization() {
-		t, err := u.GetOwnerTeam()
-		if err != nil {
-			return nil, err
-		}
-		repo.NumWatches = t.NumMembers
-	} else {
-		repo.NumWatches = 1
-	}
-
-	migrateTimeout := time.Duration(setting.Git.Timeout.Migrate) * time.Second
-
-	var err error
-	if err = util.RemoveAll(repoPath); err != nil {
-		return repo, fmt.Errorf("Failed to remove %s: %v", repoPath, err)
-	}
-
-	if err = git.Clone(opts.CloneAddr, repoPath, git.CloneRepoOptions{
-		Mirror:  true,
-		Quiet:   true,
-		Timeout: migrateTimeout,
-	}); err != nil {
-		return repo, fmt.Errorf("Clone: %v", err)
-	}
-
-	if opts.Wiki {
-		wikiPath := models.WikiPath(u.Name, opts.RepoName)
-		wikiRemotePath := WikiRemoteURL(opts.CloneAddr)
-		if len(wikiRemotePath) > 0 {
-			if err := util.RemoveAll(wikiPath); err != nil {
-				return repo, fmt.Errorf("Failed to remove %s: %v", wikiPath, err)
-			}
-
-			if err = git.Clone(wikiRemotePath, wikiPath, git.CloneRepoOptions{
-				Mirror:  true,
-				Quiet:   true,
-				Timeout: migrateTimeout,
-				Branch:  "master",
-			}); err != nil {
-				log.Warn("Clone wiki: %v", err)
-				if err := util.RemoveAll(wikiPath); err != nil {
-					return repo, fmt.Errorf("Failed to remove %s: %v", wikiPath, err)
-				}
-			}
-		}
-	}
-
-	gitRepo, err := git.OpenRepository(repoPath)
+// SyncRepoTags synchronizes releases table with repository tags
+func SyncRepoTags(ctx context.Context, repoID int64) error {
+	repo, err := repo_model.GetRepositoryByID(ctx, repoID)
 	if err != nil {
-		return repo, fmt.Errorf("OpenRepository: %v", err)
+		return err
+	}
+
+	gitRepo, err := git.OpenRepository(ctx, repo)
+	if err != nil {
+		return err
 	}
 	defer gitRepo.Close()
 
-	repo.IsEmpty, err = gitRepo.IsEmpty()
-	if err != nil {
-		return repo, fmt.Errorf("git.IsEmpty: %v", err)
-	}
+	_, err = SyncReleasesWithTags(ctx, repo, gitRepo)
+	return err
+}
 
-	if !opts.Releases && !repo.IsEmpty {
-		// Try to get HEAD branch and set it as default branch.
-		headBranch, err := gitRepo.GetHEADBranch()
+// StoreMissingLfsObjectsInRepository downloads missing LFS objects
+func StoreMissingLfsObjectsInRepository(ctx context.Context, repo *repo_model.Repository, gitRepo *git.Repository, lfsClient lfs.Client) error {
+	contentStore := lfs.NewContentStore()
+
+	pointerChan := make(chan lfs.PointerBlob)
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- lfs.SearchPointerBlobs(ctx, gitRepo, pointerChan)
+	}()
+
+	// some servers require `ref`, send the default branch for objects from all refs like
+	// `git lfs fetch --all` does on the main branch: it uses current branch as `ref`:
+	// https://github.com/git-lfs/git-lfs/blob/58a763d09d5fe4b7ea85c89ec799d71c5b0dc1da/commands/commands.go#L124-L137
+	// `man git-lfs-fetch` said that "--all" can fetch all objects, so the default branch should work
+	ref := git.RefNameFromBranch(repo.DefaultBranch).String()
+	downloadObjects := func(pointers []lfs.Pointer) error {
+		err := lfsClient.Download(ctx, ref, pointers, func(p lfs.Pointer, content io.ReadCloser, objectError error) error {
+			if errors.Is(objectError, lfs.ErrObjectNotExist) {
+				log.Warn("Ignoring missing upstream LFS object %-v: %v", p, objectError)
+				return nil
+			}
+
+			if objectError != nil {
+				return objectError
+			}
+
+			defer content.Close()
+
+			_, err := git_model.NewLFSMetaObject(ctx, repo.ID, p)
+			if err != nil {
+				log.Error("Repo[%-v]: Error creating LFS meta object %-v: %v", repo, p, err)
+				return err
+			}
+
+			if err := contentStore.Put(p, content); err != nil {
+				log.Error("Repo[%-v]: Error storing content for LFS meta object %-v: %v", repo, p, err)
+				if _, err2 := git_model.RemoveLFSMetaObjectByOid(ctx, repo.ID, p.Oid); err2 != nil {
+					log.Error("Repo[%-v]: Error removing LFS meta object %-v: %v", repo, p, err2)
+				}
+				return err
+			}
+			return nil
+		})
 		if err != nil {
-			return repo, fmt.Errorf("GetHEADBranch: %v", err)
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+			}
 		}
-		if headBranch != nil {
-			repo.DefaultBranch = headBranch.Name
-		}
-
-		if err = SyncReleasesWithTags(repo, gitRepo); err != nil {
-			log.Error("Failed to synchronize tags to releases for repository: %v", err)
-		}
+		return err
 	}
 
-	if err = repo.UpdateSize(models.DefaultDBContext()); err != nil {
-		log.Error("Failed to update size for repository: %v", err)
-	}
-
-	if opts.Mirror {
-		if err = models.InsertMirror(&models.Mirror{
-			RepoID:         repo.ID,
-			Interval:       setting.Mirror.DefaultInterval,
-			EnablePrune:    true,
-			NextUpdateUnix: timeutil.TimeStampNow().AddDuration(setting.Mirror.DefaultInterval),
-		}); err != nil {
-			return repo, fmt.Errorf("InsertOne: %v", err)
+	var batch []lfs.Pointer
+	for pointerBlob := range pointerChan {
+		meta, err := git_model.GetLFSMetaObjectByOid(ctx, repo.ID, pointerBlob.Oid)
+		if err != nil && err != git_model.ErrLFSObjectNotExist {
+			log.Error("Repo[%-v]: Error querying LFS meta object %-v: %v", repo, pointerBlob.Pointer, err)
+			return err
+		}
+		if meta != nil {
+			log.Trace("Repo[%-v]: Skipping unknown LFS meta object %-v", repo, pointerBlob.Pointer)
+			continue
 		}
 
-		repo.IsMirror = true
-		err = models.UpdateRepository(repo, false)
-	} else {
-		repo, err = CleanUpMigrateInfo(repo)
-	}
+		log.Trace("Repo[%-v]: LFS object %-v not present in repository", repo, pointerBlob.Pointer)
 
-	return repo, err
-}
-
-// cleanUpMigrateGitConfig removes mirror info which prevents "push --all".
-// This also removes possible user credentials.
-func cleanUpMigrateGitConfig(configPath string) error {
-	cfg, err := ini.Load(configPath)
-	if err != nil {
-		return fmt.Errorf("open config file: %v", err)
-	}
-	cfg.DeleteSection("remote \"origin\"")
-	if err = cfg.SaveToIndent(configPath, "\t"); err != nil {
-		return fmt.Errorf("save config file: %v", err)
-	}
-	return nil
-}
-
-// CleanUpMigrateInfo finishes migrating repository and/or wiki with things that don't need to be done for mirrors.
-func CleanUpMigrateInfo(repo *models.Repository) (*models.Repository, error) {
-	repoPath := repo.RepoPath()
-	if err := createDelegateHooks(repoPath); err != nil {
-		return repo, fmt.Errorf("createDelegateHooks: %v", err)
-	}
-	if repo.HasWiki() {
-		if err := createDelegateHooks(repo.WikiPath()); err != nil {
-			return repo, fmt.Errorf("createDelegateHooks.(wiki): %v", err)
-		}
-	}
-
-	_, err := git.NewCommand("remote", "rm", "origin").RunInDir(repoPath)
-	if err != nil && !strings.HasPrefix(err.Error(), "exit status 128 - fatal: No such remote ") {
-		return repo, fmt.Errorf("CleanUpMigrateInfo: %v", err)
-	}
-
-	if repo.HasWiki() {
-		if err := cleanUpMigrateGitConfig(path.Join(repo.WikiPath(), "config")); err != nil {
-			return repo, fmt.Errorf("cleanUpMigrateGitConfig (wiki): %v", err)
-		}
-	}
-
-	return repo, models.UpdateRepository(repo, false)
-}
-
-// SyncReleasesWithTags synchronizes release table with repository tags
-func SyncReleasesWithTags(repo *models.Repository, gitRepo *git.Repository) error {
-	existingRelTags := make(map[string]struct{})
-	opts := models.FindReleasesOptions{IncludeDrafts: true, IncludeTags: true, ListOptions: models.ListOptions{PageSize: 50}}
-	for page := 1; ; page++ {
-		opts.Page = page
-		rels, err := models.GetReleasesByRepoID(repo.ID, opts)
+		exist, err := contentStore.Exists(pointerBlob.Pointer)
 		if err != nil {
-			return fmt.Errorf("GetReleasesByRepoID: %v", err)
+			log.Error("Repo[%-v]: Error checking if LFS object %-v exists: %v", repo, pointerBlob.Pointer, err)
+			return err
 		}
-		if len(rels) == 0 {
-			break
-		}
-		for _, rel := range rels {
-			if rel.IsDraft {
+
+		if exist {
+			log.Trace("Repo[%-v]: LFS object %-v already present; creating meta object", repo, pointerBlob.Pointer)
+			_, err := git_model.NewLFSMetaObject(ctx, repo.ID, pointerBlob.Pointer)
+			if err != nil {
+				log.Error("Repo[%-v]: Error creating LFS meta object %-v: %v", repo, pointerBlob.Pointer, err)
+				return err
+			}
+		} else {
+			if setting.LFS.MaxFileSize > 0 && pointerBlob.Size > setting.LFS.MaxFileSize {
+				log.Info("Repo[%-v]: LFS object %-v download denied because of LFS_MAX_FILE_SIZE=%d < size %d", repo, pointerBlob.Pointer, setting.LFS.MaxFileSize, pointerBlob.Size)
 				continue
 			}
-			commitID, err := gitRepo.GetTagCommitID(rel.TagName)
-			if err != nil && !git.IsErrNotExist(err) {
-				return fmt.Errorf("GetTagCommitID: %s: %v", rel.TagName, err)
-			}
-			if git.IsErrNotExist(err) || commitID != rel.Sha1 {
-				if err := models.PushUpdateDeleteTag(repo, rel.TagName); err != nil {
-					return fmt.Errorf("PushUpdateDeleteTag: %s: %v", rel.TagName, err)
+
+			batch = append(batch, pointerBlob.Pointer)
+			if len(batch) >= lfsClient.BatchSize() {
+				if err := downloadObjects(batch); err != nil {
+					return err
 				}
-			} else {
-				existingRelTags[strings.ToLower(rel.TagName)] = struct{}{}
+				batch = nil
 			}
 		}
 	}
-	tags, err := gitRepo.GetTags()
+	if len(batch) > 0 {
+		if err := downloadObjects(batch); err != nil {
+			return err
+		}
+	}
+
+	err := <-errChan
 	if err != nil {
-		return fmt.Errorf("GetTags: %v", err)
+		log.Error("Repo[%-v]: Error enumerating LFS objects for repository: %v", repo, err)
 	}
-	for _, tagName := range tags {
-		if _, ok := existingRelTags[strings.ToLower(tagName)]; !ok {
-			if err := PushUpdateAddTag(repo, gitRepo, tagName); err != nil {
-				return fmt.Errorf("pushUpdateAddTag: %v", err)
-			}
-		}
-	}
-	return nil
+
+	return err
 }
 
-// PushUpdateAddTag must be called for any push actions to add tag
-func PushUpdateAddTag(repo *models.Repository, gitRepo *git.Repository, tagName string) error {
-	tag, err := gitRepo.GetTag(tagName)
+// shortRelease to reduce load memory, this struct can replace repo_model.Release
+type shortRelease struct {
+	ID      int64
+	TagName string
+	Sha1    string
+	IsTag   bool
+}
+
+func (shortRelease) TableName() string {
+	return "release"
+}
+
+// SyncReleasesWithTags is a tag<->release table
+// synchronization which overwrites all Releases from the repository tags. This
+// can be relied on since a pull-mirror is always identical to its
+// upstream. Hence, after each sync we want the release set to be
+// identical to the upstream tag set. This is much more efficient for
+// repositories like https://github.com/vim/vim (with over 13000 tags).
+func SyncReleasesWithTags(ctx context.Context, repo *repo_model.Repository, gitRepo *git.Repository) ([]*SyncResult, error) {
+	log.Debug("SyncReleasesWithTags: in Repo[%d:%s/%s]", repo.ID, repo.OwnerName, repo.Name)
+	tags, _, err := gitRepo.GetTagInfos(ctx, 0, 0)
 	if err != nil {
-		return fmt.Errorf("GetTag: %v", err)
+		return nil, fmt.Errorf("unable to GetTagInfos in pull-mirror Repo[%d:%s/%s]: %w", repo.ID, repo.OwnerName, repo.Name, err)
 	}
-	commit, err := tag.Commit()
-	if err != nil {
-		return fmt.Errorf("Commit: %v", err)
-	}
-
-	sig := tag.Tagger
-	if sig == nil {
-		sig = commit.Author
-	}
-	if sig == nil {
-		sig = commit.Committer
-	}
-
-	var author *models.User
-	var createdAt = time.Unix(1, 0)
-
-	if sig != nil {
-		author, err = models.GetUserByEmail(sig.Email)
-		if err != nil && !models.IsErrUserNotExist(err) {
-			return fmt.Errorf("GetUserByEmail: %v", err)
+	var added, deleted, updated int
+	var syncResults []*SyncResult
+	err = db.WithTx(ctx, func(ctx context.Context) error {
+		dbReleases, err := db.Find[shortRelease](ctx, repo_model.FindReleasesOptions{
+			RepoID:        repo.ID,
+			IncludeDrafts: true,
+			IncludeTags:   true,
+		})
+		if err != nil {
+			return fmt.Errorf("unable to FindReleases in pull-mirror Repo[%d:%s/%s]: %w", repo.ID, repo.OwnerName, repo.Name, err)
 		}
-		createdAt = sig.When
-	}
 
-	commitsCount, err := commit.CommitsCount()
+		dbReleasesByID := make(map[int64]*shortRelease, len(dbReleases))
+		dbReleasesByTag := make(map[string]*shortRelease, len(dbReleases))
+		for _, release := range dbReleases {
+			dbReleasesByID[release.ID] = release
+			dbReleasesByTag[release.TagName] = release
+		}
+
+		inserts, deletes, updates := calcSync(tags, dbReleases)
+		syncResults = make([]*SyncResult, 0, len(inserts)+len(deletes)+len(updates))
+		for _, tag := range inserts {
+			syncResults = append(syncResults, &SyncResult{
+				RefName:     git.RefNameFromTag(tag.Name),
+				OldCommitID: "",
+				NewCommitID: tag.Object.RefName(),
+			})
+		}
+		for _, deleteID := range deletes {
+			release := dbReleasesByID[deleteID]
+			if release == nil {
+				continue
+			}
+			syncResults = append(syncResults, &SyncResult{
+				RefName:     git.RefNameFromTag(release.TagName),
+				OldCommitID: git.RefNameFromCommit(release.Sha1),
+				NewCommitID: "",
+			})
+		}
+		for _, tag := range updates {
+			release := dbReleasesByTag[tag.Name]
+			var oldCommitID git.RefName
+			if release != nil {
+				oldCommitID = git.RefNameFromCommit(release.Sha1)
+			}
+			syncResults = append(syncResults, &SyncResult{
+				RefName:     git.RefNameFromTag(tag.Name),
+				OldCommitID: oldCommitID,
+				NewCommitID: tag.Object.RefName(),
+			})
+		}
+		//
+		// make release set identical to upstream tags
+		//
+		for _, tag := range inserts {
+			release := repo_model.Release{
+				RepoID:       repo.ID,
+				TagName:      tag.Name,
+				LowerTagName: strings.ToLower(tag.Name),
+				Sha1:         tag.Object.String(),
+				// NOTE: ignored, The NumCommits value is calculated and cached on demand when the UI requires it.
+				NumCommits:    -1,
+				CreatedUnix:   timeutil.TimeStamp(util.IfZero(tag.CommitDate, tag.Tagger.When).Unix()),
+				PublishedUnix: timeutil.TimeStamp(tag.Tagger.When.Unix()),
+				IsTag:         true,
+			}
+			if err := db.Insert(ctx, release); err != nil {
+				return fmt.Errorf("unable insert tag %s for pull-mirror Repo[%d:%s/%s]: %w", tag.Name, repo.ID, repo.OwnerName, repo.Name, err)
+			}
+		}
+
+		// only delete tags releases
+		if len(deletes) > 0 {
+			if _, err := db.GetEngine(ctx).Where("repo_id=?", repo.ID).
+				In("id", deletes).
+				Delete(&repo_model.Release{}); err != nil {
+				return fmt.Errorf("unable to delete tags for pull-mirror Repo[%d:%s/%s]: %w", repo.ID, repo.OwnerName, repo.Name, err)
+			}
+		}
+
+		for _, tag := range updates {
+			if _, err := db.GetEngine(ctx).Where("repo_id = ? AND lower_tag_name = ?", repo.ID, strings.ToLower(tag.Name)).
+				Cols("sha1", "created_unix", "published_unix").
+				Update(&repo_model.Release{
+					Sha1:          tag.Object.String(),
+					CreatedUnix:   timeutil.TimeStamp(util.IfZero(tag.CommitDate, tag.Tagger.When).Unix()),
+					PublishedUnix: timeutil.TimeStamp(tag.Tagger.When.Unix()),
+				}); err != nil {
+				return fmt.Errorf("unable to update tag %s for pull-mirror Repo[%d:%s/%s]: %w", tag.Name, repo.ID, repo.OwnerName, repo.Name, err)
+			}
+		}
+		added, deleted, updated = len(inserts), len(deletes), len(updates)
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("CommitsCount: %v", err)
+		return nil, fmt.Errorf("unable to rebuild release table for pull-mirror Repo[%d:%s/%s]: %w", repo.ID, repo.OwnerName, repo.Name, err)
 	}
 
-	var rel = models.Release{
-		RepoID:       repo.ID,
-		TagName:      tagName,
-		LowerTagName: strings.ToLower(tagName),
-		Sha1:         commit.ID.String(),
-		NumCommits:   commitsCount,
-		CreatedUnix:  timeutil.TimeStamp(createdAt.Unix()),
-		IsTag:        true,
+	log.Trace("SyncReleasesWithTags: %d tags added, %d tags deleted, %d tags updated", added, deleted, updated)
+	return syncResults, nil
+}
+
+func calcSync(destTags []*git.Tag, dbTags []*shortRelease) ([]*git.Tag, []int64, []*git.Tag) {
+	destTagMap := make(map[string]*git.Tag)
+	for _, tag := range destTags {
+		destTagMap[tag.Name] = tag
 	}
-	if author != nil {
-		rel.PublisherID = author.ID
+	dbTagMap := make(map[string]*shortRelease)
+	for _, rel := range dbTags {
+		dbTagMap[rel.TagName] = rel
 	}
 
-	return models.SaveOrUpdateTag(repo, &rel)
+	inserted := make([]*git.Tag, 0, 10)
+	updated := make([]*git.Tag, 0, 10)
+	for _, tag := range destTags {
+		rel := dbTagMap[tag.Name]
+		if rel == nil {
+			inserted = append(inserted, tag)
+		} else if rel.Sha1 != tag.Object.String() {
+			updated = append(updated, tag)
+		}
+	}
+	deleted := make([]int64, 0, 10)
+	for _, tag := range dbTags {
+		if destTagMap[tag.TagName] == nil && tag.IsTag {
+			deleted = append(deleted, tag.ID)
+		}
+	}
+	return inserted, deleted, updated
 }

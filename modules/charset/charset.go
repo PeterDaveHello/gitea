@@ -1,125 +1,178 @@
 // Copyright 2014 The Gogs Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package charset
 
 import (
 	"bytes"
-	"fmt"
+	"io"
+	"regexp"
 	"strings"
+	"sync"
+	"unicode"
 	"unicode/utf8"
 
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/util"
 
 	"github.com/gogs/chardet"
 	"golang.org/x/net/html/charset"
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/unicode/utf32"
 	"golang.org/x/text/transform"
 )
 
-// UTF8BOM is the utf-8 byte-order marker
-var UTF8BOM = []byte{'\xef', '\xbb', '\xbf'}
+const utf8Bom = "\xef\xbb\xbf"
 
-// ToUTF8WithErr converts content to UTF8 encoding
-func ToUTF8WithErr(content []byte) (string, error) {
-	charsetLabel, err := DetectEncoding(content)
+var globalVars = sync.OnceValue(func() (ret struct {
+	defaultWordRegexp   *regexp.Regexp
+	ambiguousTableMap   map[string]*AmbiguousTable
+	invisibleRangeTable *unicode.RangeTable
+},
+) {
+	ret.ambiguousTableMap = newAmbiguousTableMap()
+	ret.invisibleRangeTable = newInvisibleRangeTable()
+	return ret
+})
+
+func Lookup(label string) (e encoding.Encoding, name string) {
+	e, name = charset.Lookup(label)
+	if e != nil {
+		return e, name
+	}
+	switch {
+	case strings.EqualFold(label, "UTF-32BE"):
+		return utf32.UTF32(utf32.BigEndian, utf32.IgnoreBOM), "UTF-32BE"
+	case strings.EqualFold(label, "UTF-32LE"):
+		return utf32.UTF32(utf32.LittleEndian, utf32.IgnoreBOM), "UTF-32LE"
+	}
+	return nil, ""
+}
+
+type ConvertOpts struct {
+	KeepBOM           bool
+	ErrorReplacement  []byte // leave it empty to remove the invalid bytes
+	ErrorReturnOrigin bool
+}
+
+var ToUTF8WithFallbackReaderPrefetchSize = 16 * 1024
+
+// ToUTF8WithFallbackReader detects the encoding of content and converts to UTF-8 reader if possible
+func ToUTF8WithFallbackReader(rd io.Reader, opts ConvertOpts) io.Reader {
+	buf := make([]byte, ToUTF8WithFallbackReaderPrefetchSize)
+	n, err := util.ReadAtMost(rd, buf)
 	if err != nil {
-		return "", err
-	} else if charsetLabel == "UTF-8" {
-		return string(RemoveBOMIfPresent(content)), nil
+		// read error occurs, don't do any processing
+		return io.MultiReader(bytes.NewReader(buf[:n]), rd)
 	}
 
-	encoding, _ := charset.Lookup(charsetLabel)
+	charsetLabel, _ := DetectEncoding(buf[:n])
+	if charsetLabel == "UTF-8" {
+		// is utf-8, try to remove BOM and read it as-is
+		return io.MultiReader(bytes.NewReader(maybeRemoveBOM(buf[:n], opts)), rd)
+	}
+
+	encoding, _ := Lookup(charsetLabel)
 	if encoding == nil {
-		return string(content), fmt.Errorf("Unknown encoding: %s", charsetLabel)
+		// unknown charset, don't do any processing
+		return io.MultiReader(bytes.NewReader(buf[:n]), rd)
 	}
 
-	// If there is an error, we concatenate the nicely decoded part and the
-	// original left over. This way we won't lose much data.
-	result, n, err := transform.Bytes(encoding.NewDecoder(), content)
-	if err != nil {
-		result = append(result, content[n:]...)
-	}
-
-	result = RemoveBOMIfPresent(result)
-
-	return string(result), err
+	// convert from charset to utf-8
+	return transform.NewReader(
+		io.MultiReader(bytes.NewReader(buf[:n]), rd),
+		encoding.NewDecoder(),
+	)
 }
 
-// ToUTF8WithFallback detects the encoding of content and coverts to UTF-8 if possible
-func ToUTF8WithFallback(content []byte) []byte {
-	charsetLabel, err := DetectEncoding(content)
-	if err != nil || charsetLabel == "UTF-8" {
-		return RemoveBOMIfPresent(content)
-	}
-
-	encoding, _ := charset.Lookup(charsetLabel)
-	if encoding == nil {
-		return content
-	}
-
-	// If there is an error, we concatenate the nicely decoded part and the
-	// original left over. This way we won't lose data.
-	result, n, err := transform.Bytes(encoding.NewDecoder(), content)
-	if err != nil {
-		return append(result, content[n:]...)
-	}
-
-	return RemoveBOMIfPresent(result)
+// ToUTF8WithFallback detects the encoding of content and converts to UTF-8 if possible
+func ToUTF8WithFallback(content []byte, opts ConvertOpts) []byte {
+	bs, _ := io.ReadAll(ToUTF8WithFallbackReader(bytes.NewReader(content), opts))
+	return bs
 }
 
-// ToUTF8 converts content to UTF8 encoding and ignore error
-func ToUTF8(content string) string {
-	res, _ := ToUTF8WithErr([]byte(content))
-	return res
-}
-
-// ToUTF8DropErrors makes sure the return string is valid utf-8; attempts conversion if possible
 func ToUTF8DropErrors(content []byte) []byte {
-	charsetLabel, err := DetectEncoding(content)
-	if err != nil || charsetLabel == "UTF-8" {
-		return RemoveBOMIfPresent(content)
+	return ToUTF8(content, ConvertOpts{ErrorReplacement: []byte{' '}})
+}
+
+func ToUTF8(content []byte, opts ConvertOpts) []byte {
+	charsetLabel, _ := DetectEncoding(content)
+	if charsetLabel == "UTF-8" {
+		// even if the detected charset is UTF-8, the content may contain invalid UTF-8 sequences, so need to convert it to valid UTF-8
+		content = maybeRemoveBOM(content, opts)
+		if opts.ErrorReturnOrigin {
+			return content
+		}
+		return bytes.ToValidUTF8(content, opts.ErrorReplacement)
 	}
 
-	encoding, _ := charset.Lookup(charsetLabel)
+	encoding, _ := Lookup(charsetLabel)
 	if encoding == nil {
-		return content
+		setting.PanicInDevOrTesting("unsupported detected charset %q, it shouldn't happen", charsetLabel)
+		if opts.ErrorReturnOrigin {
+			return content
+		}
+		return bytes.ToValidUTF8(content, opts.ErrorReplacement)
 	}
 
-	// We ignore any non-decodable parts from the file.
-	// Some parts might be lost
 	var decoded []byte
 	decoder := encoding.NewDecoder()
 	idx := 0
-	for {
+	for idx < len(content) {
 		result, n, err := transform.Bytes(decoder, content[idx:])
 		decoded = append(decoded, result...)
 		if err == nil {
 			break
 		}
-		decoded = append(decoded, ' ')
-		idx = idx + n + 1
-		if idx >= len(content) {
-			break
+		if opts.ErrorReturnOrigin {
+			return content
 		}
+		decoded = append(decoded, opts.ErrorReplacement...)
+		idx += n + 1
 	}
-
-	return RemoveBOMIfPresent(decoded)
+	return maybeRemoveBOM(decoded, opts)
 }
 
-// RemoveBOMIfPresent removes a UTF-8 BOM from a []byte
-func RemoveBOMIfPresent(content []byte) []byte {
-	if len(content) > 2 && bytes.Equal(content[0:3], UTF8BOM) {
-		return content[3:]
+// maybeRemoveBOM removes a UTF-8 BOM from a []byte when opts.KeepBOM is false
+func maybeRemoveBOM(content []byte, opts ConvertOpts) []byte {
+	if opts.KeepBOM {
+		return content
 	}
-	return content
+	return bytes.TrimPrefix(content, []byte(utf8Bom))
 }
 
 // DetectEncoding detect the encoding of content
-func DetectEncoding(content []byte) (string, error) {
-	if utf8.Valid(content) {
-		log.Debug("Detected encoding: utf-8 (fast)")
+// it always returns a detected or guessed "encoding" string, no matter error happens or not
+func DetectEncoding(content []byte) (encoding string, _ error) {
+	// First we check if the content represents valid utf8 content excepting a truncated character at the end.
+
+	// Now we could decode all the runes in turn but this is not necessarily the cheapest thing to do
+	// instead we walk backwards from the end to trim off the incomplete character
+	toValidate := content
+	end := len(toValidate) - 1
+
+	// U+0000   U+007F 	  0yyyzzzz
+	// U+0080   U+07FF 	  110xxxyy 	10yyzzzz
+	// U+0800   U+FFFF 	  1110wwww 	10xxxxyy 	10yyzzzz
+	// U+010000 U+10FFFF 	11110uvv 	10vvwwww 	10xxxxyy 	10yyzzzz
+	cnt := 0
+	for end >= 0 && cnt < 4 {
+		c := toValidate[end]
+		if c>>5 == 0b110 || c>>4 == 0b1110 || c>>3 == 0b11110 {
+			// a leading byte
+			toValidate = toValidate[:end]
+			break
+		} else if c>>6 == 0b10 {
+			// a continuation byte
+			end--
+		} else {
+			// not an utf-8 byte
+			break
+		}
+		cnt++
+	}
+
+	if utf8.Valid(toValidate) {
 		return "UTF-8", nil
 	}
 
@@ -128,25 +181,21 @@ func DetectEncoding(content []byte) (string, error) {
 	if len(content) < 1024 {
 		// Check if original content is valid
 		if _, err := textDetector.DetectBest(content); err != nil {
-			return "", err
+			return util.IfZero(setting.Repository.AnsiCharset, "UTF-8"), err
 		}
 		times := 1024 / len(content)
 		detectContent = make([]byte, 0, times*len(content))
-		for i := 0; i < times; i++ {
+		for range times {
 			detectContent = append(detectContent, content...)
 		}
 	} else {
 		detectContent = content
 	}
 
-	// Now we can't use DetectBest or just results[0] because the result isn't stable - so we need a tie break
+	// Now we can't use DetectBest or just results[0] because the result isn't stable - so we need a tie-break
 	results, err := textDetector.DetectAll(detectContent)
 	if err != nil {
-		if err == chardet.NotDetectedError && len(setting.Repository.AnsiCharset) > 0 {
-			log.Debug("Using default AnsiCharset: %s", setting.Repository.AnsiCharset)
-			return setting.Repository.AnsiCharset, nil
-		}
-		return "", err
+		return util.IfZero(setting.Repository.AnsiCharset, "UTF-8"), err
 	}
 
 	topConfidence := results[0].Confidence
@@ -159,7 +208,7 @@ func DetectEncoding(content []byte) (string, error) {
 			break
 		}
 
-		// Otherwise check if this results is earlier in the DetectedCharsetOrder than our current top guesss
+		// Otherwise check if this results is earlier in the DetectedCharsetOrder than our current top guess
 		resultPriority, resultHas := setting.Repository.DetectedCharsetScore[strings.ToLower(strings.TrimSpace(result.Charset))]
 		if resultHas && (!has || resultPriority < priority) {
 			topResult = result
@@ -169,11 +218,9 @@ func DetectEncoding(content []byte) (string, error) {
 	}
 
 	// FIXME: to properly decouple this function the fallback ANSI charset should be passed as an argument
-	if topResult.Charset != "UTF-8" && len(setting.Repository.AnsiCharset) > 0 {
-		log.Debug("Using default AnsiCharset: %s", setting.Repository.AnsiCharset)
+	if topResult.Charset != "UTF-8" && setting.Repository.AnsiCharset != "" {
 		return setting.Repository.AnsiCharset, err
 	}
 
-	log.Debug("Detected encoding: %s", topResult.Charset)
-	return topResult.Charset, err
+	return topResult.Charset, nil
 }

@@ -1,5 +1,8 @@
+*.min.css
+*.min.js
+/assets/*.json
+/options/gitignore
+/options/license
+/public/assets
 /vendor
-/public/vendor/plugins
-/modules/options/bindata.go
-/modules/public/bindata.go
-/modules/templates/bindata.go
+node_modules

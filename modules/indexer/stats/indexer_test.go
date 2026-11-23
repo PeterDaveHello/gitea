@@ -1,43 +1,50 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package stats
 
 import (
-	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/setting"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/models/unittest"
+	"gitea.dev/modules/queue"
+	"gitea.dev/modules/setting"
 
-	"gopkg.in/ini.v1"
+	_ "gitea.dev/models"
+	_ "gitea.dev/models/actions"
+	_ "gitea.dev/models/activities"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestMain(m *testing.M) {
-	models.MainTest(m, filepath.Join("..", "..", ".."))
+	unittest.MainTest(m)
 }
 
 func TestRepoStatsIndex(t *testing.T) {
-	assert.NoError(t, models.PrepareTestDatabase())
-	setting.Cfg = ini.Empty()
+	assert.NoError(t, unittest.PrepareTestDatabase())
+	setting.CfgProvider, _ = setting.NewConfigProviderFromData("")
 
-	setting.NewQueueService()
+	setting.LoadQueueSettings()
 
-	err := Init()
+	err := Init(&sync.WaitGroup{})
 	assert.NoError(t, err)
 
-	time.Sleep(5 * time.Second)
-
-	repo, err := models.GetRepositoryByID(1)
+	repo, err := repo_model.GetRepositoryByID(t.Context(), 1)
 	assert.NoError(t, err)
-	status, err := repo.GetIndexerStatus(models.RepoIndexerTypeStats)
+
+	err = UpdateRepoIndexer(repo)
+	assert.NoError(t, err)
+
+	assert.NoError(t, queue.GetManager().FlushAll(t.Context(), 5*time.Second))
+
+	status, err := repo_model.GetIndexerStatus(t.Context(), repo, repo_model.RepoIndexerTypeStats)
 	assert.NoError(t, err)
 	assert.Equal(t, "65f1bf27bc3bf70f64657658635e66094edbcb4d", status.CommitSha)
-	langs, err := repo.GetTopLanguageStats(5)
+	langs, err := repo_model.GetTopLanguageStats(t.Context(), repo, 5)
 	assert.NoError(t, err)
 	assert.Empty(t, langs)
 }

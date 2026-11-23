@@ -1,14 +1,13 @@
 // Copyright 2018 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package repo
 
 import (
 	"net/http"
 
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/repofiles"
+	"gitea.dev/services/context"
+	files_service "gitea.dev/services/repository/files"
 )
 
 // GetTree get the tree of a repository.
@@ -52,17 +51,18 @@ func GetTree(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/GitTreeResponse"
-	//   "400":
+	//   default:
 	//     "$ref": "#/responses/error"
 
-	sha := ctx.Params(":sha")
+	sha := ctx.PathParam("sha")
 	if len(sha) == 0 {
-		ctx.Error(http.StatusBadRequest, "", "sha not provided")
+		ctx.APIError(http.StatusBadRequest, "sha not provided")
 		return
 	}
-	if tree, err := repofiles.GetTreeBySHA(ctx.Repo.Repository, sha, ctx.QueryInt("page"), ctx.QueryInt("per_page"), ctx.QueryBool("recursive")); err != nil {
-		ctx.Error(http.StatusBadRequest, "", err.Error())
+	if tree, err := files_service.GetTreeBySHA(ctx, ctx.Repo.Repository, ctx.Repo.GitRepo, sha, ctx.FormInt("page"), ctx.FormInt("per_page"), ctx.FormBool("recursive")); err != nil {
+		ctx.APIErrorAuto(err)
 	} else {
+		ctx.SetTotalCountHeader(int64(tree.TotalCount))
 		ctx.JSON(http.StatusOK, tree)
 	}
 }

@@ -1,18 +1,38 @@
 // Copyright 2016 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package repo
 
 import (
 	"net/http"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/context"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/routers/api/v1/utils"
-	releaseservice "code.gitea.io/gitea/services/release"
+	auth_model "gitea.dev/models/auth"
+	"gitea.dev/models/db"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/models/unit"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/git"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/modules/web"
+	"gitea.dev/routers/api/v1/utils"
+	"gitea.dev/services/context"
+	"gitea.dev/services/convert"
+	release_service "gitea.dev/services/release"
 )
+
+func canAccessReleaseDraft(ctx *context.APIContext) bool {
+	if !ctx.IsSigned || !ctx.Repo.Permission.CanWrite(unit.TypeReleases) {
+		return false
+	}
+	scope, hasApiTokenScope := user_model.GetDoerTokenScope(ctx.Doer)
+	if !hasApiTokenScope {
+		// not API token request, the request is from a user session with write access
+		return true
+	}
+	requiredScopes := auth_model.GetRequiredScopes(auth_model.Write, auth_model.AccessTokenScopeCategoryRepository)
+	allow, _ := scope.HasScope(requiredScopes...) // err (invalid token) can be safely ignored
+	return allow
+}
 
 // GetRelease get a single release of a repository
 func GetRelease(ctx *context.APIContext) {
@@ -41,22 +61,71 @@ func GetRelease(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/Release"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	id := ctx.ParamsInt64(":id")
-	release, err := models.GetReleaseByID(id)
-	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetReleaseByID", err)
+	id := ctx.PathParamInt64("id")
+	release, err := repo_model.GetReleaseForRepoByID(ctx, ctx.Repo.Repository.ID, id)
+	if err != nil && !repo_model.IsErrReleaseNotExist(err) {
+		ctx.APIErrorInternal(err)
 		return
 	}
-	if release.RepoID != ctx.Repo.Repository.ID {
-		ctx.NotFound()
+	if err != nil && repo_model.IsErrReleaseNotExist(err) || release.IsTag {
+		ctx.APIErrorNotFound()
 		return
 	}
-	if err := release.LoadAttributes(); err != nil {
-		ctx.Error(http.StatusInternalServerError, "LoadAttributes", err)
+
+	if release.IsDraft && !canAccessReleaseDraft(ctx) { // only the users with write access can see draft releases
+		ctx.APIErrorNotFound()
 		return
 	}
-	ctx.JSON(http.StatusOK, release.APIFormat())
+
+	if err := release.LoadAttributes(ctx); err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+	ctx.JSON(http.StatusOK, convert.ToAPIRelease(ctx, ctx.Repo.Repository, release))
+}
+
+// GetLatestRelease gets the release set as latest, else the most recent non-prerelease, non-draft release by created_at
+func GetLatestRelease(ctx *context.APIContext) {
+	// swagger:operation GET /repos/{owner}/{repo}/releases/latest repository repoGetLatestRelease
+	// ---
+	// summary: Gets the release set as latest, else the most recent non-prerelease, non-draft release of a repository by created_at
+	// produces:
+	// - application/json
+	// parameters:
+	// - name: owner
+	//   in: path
+	//   description: owner of the repo
+	//   type: string
+	//   required: true
+	// - name: repo
+	//   in: path
+	//   description: name of the repo
+	//   type: string
+	//   required: true
+	// responses:
+	//   "200":
+	//     "$ref": "#/responses/Release"
+	//   default:
+	//     "$ref": "#/responses/error"
+	release, err := repo_model.GetLatestRelease(ctx, ctx.Repo.Repository)
+	if err != nil && !repo_model.IsErrReleaseNotExist(err) {
+		ctx.APIErrorInternal(err)
+		return
+	}
+	if err != nil && repo_model.IsErrReleaseNotExist(err) ||
+		release.IsTag || release.RepoID != ctx.Repo.Repository.ID {
+		ctx.APIErrorNotFound()
+		return
+	}
+
+	if err := release.LoadAttributes(ctx); err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+	ctx.JSON(http.StatusOK, convert.ToAPIRelease(ctx, ctx.Repo.Repository, release))
 }
 
 // ListReleases list a repository's releases
@@ -77,11 +146,18 @@ func ListReleases(ctx *context.APIContext) {
 	//   description: name of the repo
 	//   type: string
 	//   required: true
-	// - name: per_page
+	// - name: draft
 	//   in: query
-	//   description: page size of results, deprecated - use limit
-	//   type: integer
-	//   deprecated: true
+	//   description: filter (exclude / include) drafts, if you don't have repo write access none will show
+	//   type: boolean
+	// - name: pre-release
+	//   in: query
+	//   description: filter (exclude / include) pre-releases
+	//   type: boolean
+	// - name: tag_filter
+	//   in: query
+	//   description: 'filter releases by tag. supports "*" as a wildcard (for example: v1*, *beta, *rc*).'
+	//   type: string
 	// - name: page
 	//   in: query
 	//   description: page number of results to return (1-based)
@@ -93,33 +169,49 @@ func ListReleases(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/ReleaseList"
+	//   default:
+	//     "$ref": "#/responses/error"
 	listOptions := utils.GetListOptions(ctx)
-	if ctx.QueryInt("per_page") != 0 {
-		listOptions.PageSize = ctx.QueryInt("per_page")
+	if ctx.Written() {
+		return
+	}
+	opts := repo_model.FindReleasesOptions{
+		ListOptions:   listOptions,
+		IncludeDrafts: canAccessReleaseDraft(ctx),
+		IncludeTags:   false,
+		IsDraft:       ctx.FormOptionalBool("draft"),
+		IsPreRelease:  ctx.FormOptionalBool("pre-release"),
+		RepoID:        ctx.Repo.Repository.ID,
+		TagFilter:     ctx.FormString("tag_filter"),
 	}
 
-	releases, err := models.GetReleasesByRepoID(ctx.Repo.Repository.ID, models.FindReleasesOptions{
-		ListOptions:   listOptions,
-		IncludeDrafts: ctx.Repo.AccessMode >= models.AccessModeWrite,
-		IncludeTags:   false,
-	})
+	releases, err := db.Find[repo_model.Release](ctx, opts)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetReleasesByRepoID", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 	rels := make([]*api.Release, len(releases))
 	for i, release := range releases {
-		if err := release.LoadAttributes(); err != nil {
-			ctx.Error(http.StatusInternalServerError, "LoadAttributes", err)
+		if err := release.LoadAttributes(ctx); err != nil {
+			ctx.APIErrorInternal(err)
 			return
 		}
-		rels[i] = release.APIFormat()
+		rels[i] = convert.ToAPIRelease(ctx, ctx.Repo.Repository, release)
 	}
+
+	filteredCount, err := db.Count[repo_model.Release](ctx, opts)
+	if err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+
+	ctx.SetLinkHeader(filteredCount, listOptions.PageSize)
+	ctx.SetTotalCountHeader(filteredCount)
 	ctx.JSON(http.StatusOK, rels)
 }
 
 // CreateRelease create a release
-func CreateRelease(ctx *context.APIContext, form api.CreateReleaseOption) {
+func CreateRelease(ctx *context.APIContext) {
 	// swagger:operation POST /repos/{owner}/{repo}/releases repository repoCreateRelease
 	// ---
 	// summary: Create a release
@@ -145,23 +237,28 @@ func CreateRelease(ctx *context.APIContext, form api.CreateReleaseOption) {
 	// responses:
 	//   "201":
 	//     "$ref": "#/responses/Release"
-	//   "409":
+	//   default:
 	//     "$ref": "#/responses/error"
 
-	rel, err := models.GetRelease(ctx.Repo.Repository.ID, form.TagName)
+	form := web.GetForm[*api.CreateReleaseOption](ctx)
+	if ctx.Repo.Repository.IsEmpty {
+		ctx.APIError(http.StatusUnprocessableEntity, "repo is empty")
+		return
+	}
+	rel, err := repo_model.GetRelease(ctx, ctx.Repo.Repository.ID, form.TagName)
 	if err != nil {
-		if !models.IsErrReleaseNotExist(err) {
-			ctx.ServerError("GetRelease", err)
+		if !repo_model.IsErrReleaseNotExist(err) {
+			ctx.APIErrorInternal(err)
 			return
 		}
 		// If target is not provided use default branch
 		if len(form.Target) == 0 {
 			form.Target = ctx.Repo.Repository.DefaultBranch
 		}
-		rel = &models.Release{
+		rel = &repo_model.Release{
 			RepoID:       ctx.Repo.Repository.ID,
-			PublisherID:  ctx.User.ID,
-			Publisher:    ctx.User,
+			PublisherID:  ctx.Doer.ID,
+			Publisher:    ctx.Doer,
 			TagName:      form.TagName,
 			Target:       form.Target,
 			Title:        form.Title,
@@ -171,17 +268,23 @@ func CreateRelease(ctx *context.APIContext, form api.CreateReleaseOption) {
 			IsTag:        false,
 			Repo:         ctx.Repo.Repository,
 		}
-		if err := releaseservice.CreateRelease(ctx.Repo.GitRepo, rel, nil); err != nil {
-			if models.IsErrReleaseAlreadyExist(err) {
-				ctx.Error(http.StatusConflict, "ReleaseAlreadyExist", err)
+		// GitHub doesn't have "tag_message", GitLab has: https://docs.gitlab.com/api/releases/#create-a-release
+		// It doesn't need to be the same as the "release note"
+		if err := release_service.CreateRelease(ctx, ctx.Repo.GitRepo, rel, nil, form.TagMessage, form.MakeLatest); err != nil {
+			if repo_model.IsErrReleaseAlreadyExist(err) {
+				ctx.APIError(http.StatusConflict, err.Error())
+			} else if release_service.IsErrProtectedTagName(err) {
+				ctx.APIError(http.StatusUnprocessableEntity, err.Error())
+			} else if git.IsErrNotExist(err) {
+				ctx.APIError(http.StatusNotFound, "target not found")
 			} else {
-				ctx.Error(http.StatusInternalServerError, "CreateRelease", err)
+				ctx.APIErrorInternal(err)
 			}
 			return
 		}
 	} else {
 		if !rel.IsTag {
-			ctx.Error(http.StatusConflict, "GetRelease", "Release is has no Tag")
+			ctx.APIError(http.StatusConflict, "Release is has no Tag")
 			return
 		}
 
@@ -189,21 +292,22 @@ func CreateRelease(ctx *context.APIContext, form api.CreateReleaseOption) {
 		rel.Note = form.Note
 		rel.IsDraft = form.IsDraft
 		rel.IsPrerelease = form.IsPrerelease
-		rel.PublisherID = ctx.User.ID
+		rel.PublisherID = ctx.Doer.ID
 		rel.IsTag = false
 		rel.Repo = ctx.Repo.Repository
-		rel.Publisher = ctx.User
+		rel.Publisher = ctx.Doer
+		rel.Target = form.Target
 
-		if err = releaseservice.UpdateReleaseOrCreatReleaseFromTag(ctx.User, ctx.Repo.GitRepo, rel, nil, true); err != nil {
-			ctx.ServerError("UpdateReleaseOrCreatReleaseFromTag", err)
+		if err = release_service.UpdateRelease(ctx, ctx.Doer, ctx.Repo.GitRepo, rel, nil, nil, nil, form.MakeLatest); err != nil {
+			ctx.APIErrorInternal(err)
 			return
 		}
 	}
-	ctx.JSON(http.StatusCreated, rel.APIFormat())
+	ctx.JSON(http.StatusCreated, convert.ToAPIRelease(ctx, ctx.Repo.Repository, rel))
 }
 
 // EditRelease edit a release
-func EditRelease(ctx *context.APIContext, form api.EditReleaseOption) {
+func EditRelease(ctx *context.APIContext) {
 	// swagger:operation PATCH /repos/{owner}/{repo}/releases/{id} repository repoEditRelease
 	// ---
 	// summary: Update a release
@@ -235,16 +339,18 @@ func EditRelease(ctx *context.APIContext, form api.EditReleaseOption) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/Release"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	id := ctx.ParamsInt64(":id")
-	rel, err := models.GetReleaseByID(id)
-	if err != nil && !models.IsErrReleaseNotExist(err) {
-		ctx.Error(http.StatusInternalServerError, "GetReleaseByID", err)
+	form := web.GetForm[*api.EditReleaseOption](ctx)
+	id := ctx.PathParamInt64("id")
+	rel, err := repo_model.GetReleaseForRepoByID(ctx, ctx.Repo.Repository.ID, id)
+	if err != nil && !repo_model.IsErrReleaseNotExist(err) {
+		ctx.APIErrorInternal(err)
 		return
 	}
-	if err != nil && models.IsErrReleaseNotExist(err) ||
-		rel.IsTag || rel.RepoID != ctx.Repo.Repository.ID {
-		ctx.NotFound()
+	if err != nil && repo_model.IsErrReleaseNotExist(err) || rel.IsTag {
+		ctx.APIErrorNotFound()
 		return
 	}
 
@@ -266,21 +372,22 @@ func EditRelease(ctx *context.APIContext, form api.EditReleaseOption) {
 	if form.IsPrerelease != nil {
 		rel.IsPrerelease = *form.IsPrerelease
 	}
-	if err := releaseservice.UpdateReleaseOrCreatReleaseFromTag(ctx.User, ctx.Repo.GitRepo, rel, nil, false); err != nil {
-		ctx.Error(http.StatusInternalServerError, "UpdateReleaseOrCreatReleaseFromTag", err)
+	if err := release_service.UpdateRelease(ctx, ctx.Doer, ctx.Repo.GitRepo, rel, nil, nil, nil, form.MakeLatest); err != nil {
+		ctx.APIErrorInternal(err)
 		return
 	}
 
-	rel, err = models.GetReleaseByID(id)
+	// reload data from database
+	rel, err = repo_model.GetReleaseByID(ctx, id)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetReleaseByID", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
-	if err := rel.LoadAttributes(); err != nil {
-		ctx.Error(http.StatusInternalServerError, "LoadAttributes", err)
+	if err := rel.LoadAttributes(ctx); err != nil {
+		ctx.APIErrorInternal(err)
 		return
 	}
-	ctx.JSON(http.StatusOK, rel.APIFormat())
+	ctx.JSON(http.StatusOK, convert.ToAPIRelease(ctx, ctx.Repo.Repository, rel))
 }
 
 // DeleteRelease delete a release from a repository
@@ -308,20 +415,25 @@ func DeleteRelease(ctx *context.APIContext) {
 	// responses:
 	//   "204":
 	//     "$ref": "#/responses/empty"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	id := ctx.ParamsInt64(":id")
-	rel, err := models.GetReleaseByID(id)
-	if err != nil && !models.IsErrReleaseNotExist(err) {
-		ctx.Error(http.StatusInternalServerError, "GetReleaseByID", err)
+	id := ctx.PathParamInt64("id")
+	rel, err := repo_model.GetReleaseForRepoByID(ctx, ctx.Repo.Repository.ID, id)
+	if err != nil && !repo_model.IsErrReleaseNotExist(err) {
+		ctx.APIErrorInternal(err)
 		return
 	}
-	if err != nil && models.IsErrReleaseNotExist(err) ||
-		rel.IsTag || rel.RepoID != ctx.Repo.Repository.ID {
-		ctx.NotFound()
+	if err != nil && repo_model.IsErrReleaseNotExist(err) || rel.IsTag {
+		ctx.APIErrorNotFound()
 		return
 	}
-	if err := releaseservice.DeleteReleaseByID(id, ctx.User, false); err != nil {
-		ctx.Error(http.StatusInternalServerError, "DeleteReleaseByID", err)
+	if err := release_service.DeleteReleaseByID(ctx, ctx.Repo.Repository, rel, ctx.Doer, false); err != nil {
+		if release_service.IsErrProtectedTagName(err) {
+			ctx.APIError(http.StatusUnprocessableEntity, "user not allowed to delete protected tag")
+			return
+		}
+		ctx.APIErrorInternal(err)
 		return
 	}
 	ctx.Status(http.StatusNoContent)

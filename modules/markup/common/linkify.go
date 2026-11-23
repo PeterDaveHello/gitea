@@ -1,7 +1,6 @@
 // Copyright 2019 Yusuke Inuzuka
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 // Most of this file is a subtly changed version of github.com/yuin/goldmark/extension/linkify.go
 
@@ -9,7 +8,6 @@ package common
 
 import (
 	"bytes"
-	"regexp"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
@@ -18,10 +16,7 @@ import (
 	"github.com/yuin/goldmark/util"
 )
 
-var wwwURLRegxp = regexp.MustCompile(`^www\.[-a-zA-Z0-9@:%._\+~#=]{2,256}\.[a-z]{2,6}((?:/|[#?])[-a-zA-Z0-9@:%_\+.~#!?&//=\(\);,'">\^{}\[\]` + "`" + `]*)?`)
-
-type linkifyParser struct {
-}
+type linkifyParser struct{}
 
 var defaultLinkifyParser = &linkifyParser{}
 
@@ -36,10 +31,12 @@ func (s *linkifyParser) Trigger() []byte {
 	return []byte{' ', '*', '_', '~', '('}
 }
 
-var protoHTTP = []byte("http:")
-var protoHTTPS = []byte("https:")
-var protoFTP = []byte("ftp:")
-var domainWWW = []byte("www.")
+var (
+	protoHTTP  = []byte("http:")
+	protoHTTPS = []byte("https:")
+	protoFTP   = []byte("ftp:")
+	domainWWW  = []byte("www.")
+)
 
 func (s *linkifyParser) Parse(parent ast.Node, block text.Reader, pc parser.Context) ast.Node {
 	if pc.IsInLinkLabel() {
@@ -58,12 +55,12 @@ func (s *linkifyParser) Parse(parent ast.Node, block text.Reader, pc parser.Cont
 
 	var m []int
 	var protocol []byte
-	var typ ast.AutoLinkType = ast.AutoLinkURL
+	typ := ast.AutoLinkURL
 	if bytes.HasPrefix(line, protoHTTP) || bytes.HasPrefix(line, protoHTTPS) || bytes.HasPrefix(line, protoFTP) {
-		m = LinkRegex.FindSubmatchIndex(line)
+		m = GlobalVars().LinkifyRegex.FindSubmatchIndex(line)
 	}
 	if m == nil && bytes.HasPrefix(line, domainWWW) {
-		m = wwwURLRegxp.FindSubmatchIndex(line)
+		m = GlobalVars().wwwURLRegexp.FindSubmatchIndex(line)
 		protocol = []byte("http")
 	}
 	if m != nil {
@@ -73,9 +70,10 @@ func (s *linkifyParser) Parse(parent ast.Node, block text.Reader, pc parser.Cont
 		} else if lastChar == ')' {
 			closing := 0
 			for i := m[1] - 1; i >= m[0]; i-- {
-				if line[i] == ')' {
+				switch line[i] {
+				case ')':
 					closing++
-				} else if line[i] == '(' {
+				case '(':
 					closing--
 				}
 			}
@@ -83,6 +81,7 @@ func (s *linkifyParser) Parse(parent ast.Node, block text.Reader, pc parser.Cont
 				m[1] -= closing
 			}
 		} else if lastChar == ';' {
+			// exclude HTML entity reference, e.g.: exclude "&nbsp;" from "http://example.com?foo=1&nbsp;"
 			i := m[1] - 2
 			for ; i >= m[0]; i-- {
 				if util.IsAlphaNumeric(line[i]) {
@@ -92,7 +91,7 @@ func (s *linkifyParser) Parse(parent ast.Node, block text.Reader, pc parser.Cont
 			}
 			if i != m[1]-2 {
 				if line[i] == '&' {
-					m[1] -= m[1] - i
+					m[1] = i
 				}
 			}
 		}
@@ -122,9 +121,7 @@ func (s *linkifyParser) Parse(parent ast.Node, block text.Reader, pc parser.Cont
 			}
 		}
 	}
-	if m == nil {
-		return nil
-	}
+
 	if consumes != 0 {
 		s := segment.WithStop(segment.Start + 1)
 		ast.MergeOrAppendTextSegment(parent, s)
@@ -141,8 +138,7 @@ func (s *linkifyParser) CloseBlock(parent ast.Node, pc parser.Context) {
 	// nothing to do
 }
 
-type linkify struct {
-}
+type linkify struct{}
 
 // Linkify is an extension that allow you to parse text that seems like a URL.
 var Linkify = &linkify{}

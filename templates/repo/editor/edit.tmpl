@@ -1,79 +1,61 @@
 {{template "base/head" .}}
-<div class="repository file editor edit">
+<div role="main" aria-label="{{.Title}}" class="page-content repository file editor edit">
 	{{template "repo/header" .}}
-	<div class="ui container">
+	<div class="ui container fluid padded">
 		{{template "base/alert" .}}
-		<form class="ui edit form" method="post">
-			{{.CsrfTokenHtml}}
-			<input type="hidden" name="last_commit" value="{{.last_commit}}">
-			<div class="ui secondary menu">
-				<div class="fitted item treepath">
-					<div class="ui breadcrumb field {{if .Err_TreePath}}error{{end}}">
-						<a class="section" href="{{EscapePound $.BranchLink}}">{{.Repository.Name}}</a>
-						{{ $n := len .TreeNames}}
-						{{ $l := Subtract $n 1}}
-						{{range $i, $v := .TreeNames}}
-							<div class="divider"> / </div>
-							{{if eq $i $l}}
-								<input id="file-name" value="{{$v}}" placeholder="{{$.i18n.Tr "repo.editor.name_your_file"}}" data-editorconfig="{{$.Editorconfig}}" required autofocus>
-								<span class="poping up" data-content="{{$.i18n.Tr "repo.editor.filename_help"}}" data-position="bottom center" data-variation="tiny inverted">{{svg "octicon-info" 16}}</span>
-							{{else}}
-								<span class="section"><a href="{{EscapePound $.BranchLink}}/{{index $.TreePaths $i | EscapePound}}">{{$v}}</a></span>
-							{{end}}
-						{{end}}
-						<span>{{.i18n.Tr "repo.editor.or"}} <a href="{{EscapePound $.BranchLink}}{{if not .IsNewFile}}/{{EscapePound .TreePath}}{{end}}">{{.i18n.Tr "repo.editor.cancel_lower"}}</a></span>
-						<input type="hidden" id="tree_path" name="tree_path" value="{{.TreePath}}" required>
+		<div class="repo-view-container">
+			{{template "repo/view_file_tree" .}}
+			<div class="repo-view-content">
+				<form class="ui edit form form-fetch-action" method="post" action="{{.CommitFormOptions.TargetFormAction}}"
+					data-text-empty-confirm-header="{{ctx.Locale.Tr "repo.editor.commit_empty_file_header"}}"
+					data-text-empty-confirm-content="{{ctx.Locale.Tr "repo.editor.commit_empty_file_text"}}"
+				>
+					{{template "repo/editor/common_top" .}}
+					<div class="repo-editor-header">
+						{{template "repo/view_file_tree_toggle_button" .}}
+						{{template "repo/editor/common_breadcrumb" .}}
 					</div>
-				</div>
-			</div>
-			<div class="field">
-				<div class="ui top attached tabular menu" data-write="write" data-preview="preview" data-diff="diff">
-					<a class="active item" data-tab="write">{{svg "octicon-code" 16}} {{if .IsNewFile}}{{.i18n.Tr "repo.editor.new_file"}}{{else}}{{.i18n.Tr "repo.editor.edit_file"}}{{end}}</a>
-					{{if not .IsNewFile}}
-					<a class="item" data-tab="preview" data-url="{{.Repository.APIURL}}/markdown" data-context="{{.RepoLink}}/src/{{.BranchNameSubURL | EscapePound}}" data-preview-file-modes="{{.PreviewableFileModes}}" data-markdown-mode="gfm">{{svg "octicon-eye" 16}} {{.i18n.Tr "preview"}}</a>
-					<a class="item" data-tab="diff" data-url="{{.RepoLink}}/_preview/{{.BranchName | EscapePound}}/{{.TreePath | EscapePound}}" data-context="{{.BranchLink}}">{{svg "octicon-diff" 16}} {{.i18n.Tr "repo.editor.preview_changes"}}</a>
+					{{if not .NotEditableReason}}
+						<div class="field">
+							<div class="ui top attached header">
+								<div class="flex-left-right">
+									<div class="ui compact small menu small-menu-items repo-editor-menu" data-repo-link="{{.RepoLink}}" data-ref-sub-url="{{.RefTypeNameSubURL}}" data-branch-name="{{.BranchName}}" data-global-init="initTabSwitcher">
+										<a class="active item" data-tab="write">{{svg "octicon-code"}} {{if .IsNewFile}}{{ctx.Locale.Tr "repo.editor.new_file"}}{{else}}{{ctx.Locale.Tr "repo.editor.edit_file"}}{{end}}</a>
+										<a class="item {{if not .CodeEditorConfig.Previewable}}tw-hidden{{end}}" data-tab="preview">{{svg "octicon-eye"}} {{ctx.Locale.Tr "preview"}}</a>
+										{{if not .IsNewFile}}
+										<a class="item" data-tab="diff">{{svg "octicon-diff"}} {{ctx.Locale.Tr "repo.editor.preview_changes"}}</a>
+										{{end}}
+									</div>
+									{{template "repo/editor/options" dict "CodeEditorConfig" $.CodeEditorConfig}}
+								</div>
+							</div>
+							<div class="ui bottom attached segment tw-p-0">
+								<div class="ui active tab tw-rounded-b" data-tab="write">
+									<textarea id="edit_area" name="content" class="tw-hidden" data-id="repo-{{.Repository.Name}}-{{.TreePath}}"
+										data-code-editor-config="{{JsonUtils.EncodeToString $.CodeEditorConfig}}"
+										placeholder="{{ctx.Locale.Tr "editor.code_editor.placeholder"}}">{{.FileContent}}</textarea>
+									<div class="editor-loading is-loading"></div>
+								</div>
+								<div class="ui tab tw-px-4 tw-py-3" data-tab="preview">
+									<div class="editor-loading is-loading"></div>
+								</div>
+								<div class="ui tab" data-tab="diff">
+									<div class="editor-loading is-loading"></div>
+								</div>
+							</div>
+						</div>
+					{{else}}
+						<div class="field">
+							<div class="ui segment tw-text-center">
+								<h4 class="tw-font-semibold tw-mb-2">{{.NotEditableReason}}</h4>
+								<p>{{ctx.Locale.Tr "repo.editor.file_not_editable_hint"}}</p>
+							</div>
+						</div>
 					{{end}}
-				</div>
-				<div class="ui bottom attached active tab segment" data-tab="write">
-					<textarea id="edit_area" name="content" data-id="repo-{{.Repository.Name}}-{{.TreePath}}"
-						data-url="{{.Repository.APIURL}}/markdown"
-						data-context="{{.RepoLink}}"
-						data-markdown-file-exts="{{.MarkdownFileExts}}"
-						data-line-wrap-extensions="{{.LineWrapExtensions}}">
-{{.FileContent}}</textarea>
-					<div class="editor-loading is-loading"></div>
-				</div>
-				<div class="ui bottom attached tab segment markdown" data-tab="preview">
-					{{.i18n.Tr "loading"}}
-				</div>
-				<div class="ui bottom attached tab segment diff edit-diff" data-tab="diff">
-					{{.i18n.Tr "loading"}}
-				</div>
-			</div>
-			{{template "repo/editor/commit_form" .}}
-		</form>
-	</div>
-
-
-	<div class="ui small basic modal" id="edit-empty-content-modal">
-		<div class="ui icon header">
-			<i class="file icon"></i>
-            {{.i18n.Tr "repo.editor.commit_empty_file_header"}}
-		</div>
-		<div class="center content">
-			<p>{{.i18n.Tr "repo.editor.commit_empty_file_text"}}</p>
-		</div>
-		<div class="actions">
-			<div class="ui red basic cancel inverted button">
-				<i class="remove icon"></i>
-                {{.i18n.Tr "repo.editor.cancel"}}
-			</div>
-			<div class="ui green basic ok inverted button">
-				<i class="save icon"></i>
-                {{.i18n.Tr "repo.editor.commit_changes"}}
+					{{template "repo/editor/commit_form" .}}
+				</form>
 			</div>
 		</div>
 	</div>
-
 </div>
 {{template "base/footer" .}}

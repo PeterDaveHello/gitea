@@ -1,18 +1,268 @@
 // Copyright 2018 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package git
+
+import (
+	"context"
+	"strconv"
+	"strings"
+
+	"gitea.dev/modules/git/gitcmd"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/util"
+)
+
+const (
+	// RemotePrefix is the base directory of the remotes information of git.
+	RemotePrefix = "refs/remotes/"
+	// PullPrefix is the base directory of the pull information of git.
+	PullPrefix = "refs/pull/"
+	pullSuffix = "/head"
+
+	hiddenRefPrefix = "refs/gitea"
+)
+
+// IsValidRefPattern ensures that the provided string could be a valid reference
+func IsValidRefPattern(name string) bool {
+	return !globalVars().refNamePatternInvalid.MatchString(name)
+}
+
+func SanitizeRefPattern(name string) string {
+	return globalVars().refNamePatternInvalid.ReplaceAllString(name, "_")
+}
 
 // Reference represents a Git ref.
 type Reference struct {
 	Name   string
 	repo   *Repository
-	Object SHA1 // The id of this commit object
+	Object ObjectID // The id of this commit object
 	Type   string
 }
 
 // Commit return the commit of the reference
-func (ref *Reference) Commit() (*Commit, error) {
-	return ref.repo.getCommit(ref.Object)
+func (ref *Reference) Commit(ctx context.Context) (*Commit, error) {
+	return ref.repo.getCommit(ctx, ref.Object)
+}
+
+// ShortName returns the short name of the reference
+func (ref *Reference) ShortName() string {
+	return RefName(ref.Name).ShortName()
+}
+
+// RefGroup returns the group type of the reference
+func (ref *Reference) RefGroup() string {
+	return RefName(ref.Name).RefGroup()
+}
+
+// ForPrefix special ref to create a pull request: refs/for/<target-branch>/<topic-branch>
+// or refs/for/<targe-branch> -o topic='<topic-branch>'
+const ForPrefix = "refs/for/"
+
+// TODO: /refs/for-review for suggest change interface
+
+// RefName represents a full git reference name
+type RefName string
+
+const RefNameHead = "HEAD"
+
+func RefNameFromBranch(shortName string) RefName {
+	return RefName(BranchPrefix + shortName)
+}
+
+func RefNameFromTag(shortName string) RefName {
+	return RefName(TagPrefix + shortName)
+}
+
+func RefNameFromCommit(shortName string) RefName {
+	if !isStringLowerHex(shortName) {
+		setting.PanicInDevOrTesting("BUG! invalid commit id %s", shortName)
+		return RefName("refs/invalid-commit/" + shortName)
+	}
+	return RefName(shortName)
+}
+
+func RefNameFromPullIndex(prIndex int64) RefName {
+	return RefName(PullPrefix + strconv.FormatInt(prIndex, 10) + pullSuffix)
+}
+
+// MergeRefNameFromPullIndex is the test merge of an open pull request
+func MergeRefNameFromPullIndex(prIndex int64) RefName {
+	return RefName(PullPrefix + strconv.FormatInt(prIndex, 10) + "/merge")
+}
+
+// MergedRefNameFromPullIndex keeps the merged commit after the base branch is deleted or rewritten
+func MergedRefNameFromPullIndex(prIndex int64) RefName {
+	return RefName(hiddenRefPrefix + "/pull/" + strconv.FormatInt(prIndex, 10) + "/merged")
+}
+
+// RunRefNameFromRunID keeps a run's test merge after refs/pull/<index>/merge moved on
+func RunRefNameFromRunID(runID int64) RefName {
+	return RefName(hiddenRefPrefix + "/run/" + strconv.FormatInt(runID, 10))
+}
+
+func (ref RefName) String() string {
+	return string(ref)
+}
+
+func (ref RefName) IsBranch() bool {
+	return strings.HasPrefix(string(ref), BranchPrefix)
+}
+
+func (ref RefName) IsTag() bool {
+	return strings.HasPrefix(string(ref), TagPrefix)
+}
+
+func (ref RefName) IsRemote() bool {
+	return strings.HasPrefix(string(ref), RemotePrefix)
+}
+
+func (ref RefName) IsPull() bool {
+	return strings.HasPrefix(string(ref), PullPrefix) && strings.IndexByte(string(ref)[len(PullPrefix):], '/') > -1
+}
+
+func (ref RefName) IsFor() bool {
+	return strings.HasPrefix(string(ref), ForPrefix)
+}
+
+func (ref RefName) nameWithoutPrefix(prefix string) string {
+	if after, ok := strings.CutPrefix(string(ref), prefix); ok {
+		return after
+	}
+	return ""
+}
+
+// TagName returns simple tag name if it's an operation to a tag
+func (ref RefName) TagName() string {
+	return ref.nameWithoutPrefix(TagPrefix)
+}
+
+// BranchName returns simple branch name if it's an operation to branch
+func (ref RefName) BranchName() string {
+	return ref.nameWithoutPrefix(BranchPrefix)
+}
+
+func (ref RefName) PullIndex() (int64, bool) {
+	refName := string(ref)
+	s, ok := strings.CutPrefix(refName, PullPrefix)
+	if !ok {
+		return 0, false
+	}
+	pullStr, last, ok := strings.CutLast(s, "/")
+	if !ok || last != "head" {
+		return 0, false
+	}
+	pullIndex, err := strconv.ParseInt(pullStr, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return pullIndex, true
+}
+
+// ForBranchName returns the branch name part of refs like refs/for/<branch_name>
+func (ref RefName) ForBranchName() string {
+	return ref.nameWithoutPrefix(ForPrefix)
+}
+
+func (ref RefName) RemoteName() string {
+	return ref.nameWithoutPrefix(RemotePrefix)
+}
+
+// ShortName returns the short name of the reference name
+func (ref RefName) ShortName() string {
+	if ref.IsBranch() {
+		return ref.BranchName()
+	}
+	if ref.IsTag() {
+		return ref.TagName()
+	}
+	if ref.IsRemote() {
+		return ref.RemoteName()
+	}
+	if ref.IsPull() {
+		return strings.TrimSuffix(ref.nameWithoutPrefix(PullPrefix), pullSuffix)
+	}
+	if ref.IsFor() {
+		return ref.ForBranchName()
+	}
+	return string(ref) // usually it is a commit ID, or "HEAD"
+}
+
+// RefGroup returns the group type of the reference
+// Using the name of the directory under .git/refs
+func (ref RefName) RefGroup() string {
+	if ref.IsBranch() {
+		return "heads"
+	}
+	if ref.IsTag() {
+		return "tags"
+	}
+	if ref.IsRemote() {
+		return "remotes"
+	}
+	if ref.IsPull() {
+		return "pull"
+	}
+	if ref.IsFor() {
+		return "for"
+	}
+	return ""
+}
+
+// RefType is a simple ref type of the reference, it is used for UI and webhooks
+type RefType string
+
+const (
+	RefTypeBranch RefType = "branch"
+	RefTypeTag    RefType = "tag"
+	RefTypeCommit RefType = "commit"
+)
+
+// RefType returns the simple ref type of the reference, e.g. branch, tag
+// It's different from RefGroup, which is using the name of the directory under .git/refs
+func (ref RefName) RefType() RefType {
+	switch {
+	case ref.IsBranch():
+		return RefTypeBranch
+	case ref.IsTag():
+		return RefTypeTag
+	case IsStringValidObjectID(nil, string(ref), 6):
+		return RefTypeCommit
+	}
+	return ""
+}
+
+// RefWebLinkPath returns a path for the reference that can be used in a web link:
+// * "branch/<branch_name>"
+// * "tag/<tag_name>"
+// * "commit/<commit_id>"
+// It returns an empty string if the reference is not a branch, tag or commit.
+func (ref RefName) RefWebLinkPath() string {
+	refType := ref.RefType()
+	if refType == "" {
+		return ""
+	}
+	return string(refType) + "/" + util.PathEscapeSegments(ref.ShortName())
+}
+
+func ParseRefSuffix(ref string) (refName, refSuffix string) {
+	// Partially support https://git-scm.com/docs/gitrevisions
+	suffixIdx := -1 // earliest suffix mark, so a combined suffix like "main~2^" stays intact
+	for _, mark := range []string{"@{", "^", "~"} {
+		if idx := strings.Index(ref, mark); idx != -1 && (suffixIdx == -1 || idx < suffixIdx) {
+			suffixIdx = idx
+		}
+	}
+	if suffixIdx == -1 {
+		return ref, ""
+	}
+	return ref[:suffixIdx], ref[suffixIdx:]
+}
+
+func UpdateRef(ctx context.Context, repo RepositoryFacade, refName, newCommitID string) error {
+	return gitcmd.NewCommand("update-ref").AddDynamicArguments(refName, newCommitID).WithRepo(repo).RunWithStderr(ctx)
+}
+
+func RemoveRef(ctx context.Context, repo RepositoryFacade, refName string) error {
+	return gitcmd.NewCommand("update-ref", "--no-deref", "-d").AddDynamicArguments(refName).WithRepo(repo).RunWithStderr(ctx)
 }

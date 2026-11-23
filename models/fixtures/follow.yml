@@ -12,3 +12,10 @@
   id: 3
   user_id: 2
   follow_id: 8
+
+-
+  id: 4
+  user_id: 31
+  follow_id: 33
+
+# DO NOT add more test data in the fixtures, test case should prepare their own test data separately and clearly

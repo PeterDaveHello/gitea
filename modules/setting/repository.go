@@ -1,17 +1,15 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package setting
 
 import (
-	"path"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
-	"code.gitea.io/gitea/modules/log"
-
-	"github.com/unknwon/com"
+	"gitea.dev/modules/log"
 )
 
 // enumerates all the policy repository creating
@@ -21,6 +19,16 @@ const (
 	RepoCreatingPublic             = "public"
 )
 
+// enumerates the values for [repository.pull-request] DEFAULT_TITLE_SOURCE
+const (
+	RepoPRTitleSourceFirstCommit = "first-commit"
+	RepoPRTitleSourceAuto        = "auto"
+	RepoPRTitleSourceBranchName  = "branch-name"
+)
+
+// ItemsPerPage maximum items per page in forks, watchers and stars of a repo
+const ItemsPerPage = 40
+
 // Repository settings
 var (
 	Repository = struct {
@@ -29,40 +37,49 @@ var (
 		AnsiCharset                             string
 		ForcePrivate                            bool
 		DefaultPrivate                          string
+		DefaultPushCreatePrivate                bool
 		MaxCreationLimit                        int
-		MirrorQueueLength                       int
-		PullRequestQueueLength                  int
+		UserMaxCreationLimit                    int
+		OrgMaxCreationLimit                     int
 		PreferredLicenses                       []string
 		DisableHTTPGit                          bool
 		AccessControlAllowOrigin                string
 		UseCompatSSHURI                         bool
+		GoGetCloneURLProtocol                   string
 		DefaultCloseIssuesViaCommitsInAnyBranch bool
 		EnablePushCreateUser                    bool
 		EnablePushCreateOrg                     bool
 		DisabledRepoUnits                       []string
 		DefaultRepoUnits                        []string
+		DefaultForkRepoUnits                    []string
+		DefaultMirrorRepoUnits                  []string
+		DefaultTemplateRepoUnits                []string
 		PrefixArchiveFiles                      bool
-		DisableMirrors                          bool
+		DisableMigrations                       bool
+		DisableStars                            bool `ini:"DISABLE_STARS"`
 		DefaultBranch                           string
+		DefaultObjectFormat                     string
+		DisableDownloadSourceArchives           bool
+		AllowForkWithoutMaximumLimit            bool
+		AllowForkIntoSameOwner                  bool
+
+		// StreamArchives makes Gitea stream git archive files to the client directly instead of creating an archive first.
+		// Ideally all users should use this streaming method. However, at the moment we don't know whether there are
+		// any users who still need the old behavior, so we introduce this option, intentionally not documenting it.
+		// After one or two releases, if no one complains, we will remove this option and always use streaming.
+		StreamArchives bool
 
 		// Repository editor settings
 		Editor struct {
-			LineWrapExtensions   []string
-			PreviewableFileModes []string
+			LineWrapExtensions []string
 		} `ini:"-"`
 
 		// Repository upload settings
 		Upload struct {
 			Enabled      bool
-			TempPath     string
-			AllowedTypes []string `delim:"|"`
+			AllowedTypes string
 			FileMaxSize  int64
 			MaxFiles     int
-		} `ini:"-"`
-
-		// Repository local settings
-		Local struct {
-			LocalCopyPath string
 		} `ini:"-"`
 
 		// Pull request settings
@@ -70,71 +87,56 @@ var (
 			WorkInProgressPrefixes                   []string
 			CloseKeywords                            []string
 			ReopenKeywords                           []string
+			DefaultMergeStyle                        string
 			DefaultMergeMessageCommitsLimit          int
 			DefaultMergeMessageSize                  int
 			DefaultMergeMessageAllAuthors            bool
 			DefaultMergeMessageMaxApprovers          int
 			DefaultMergeMessageOfficialApproversOnly bool
+			DefaultSquashMergeMessage                string
+			AddCoCommitterTrailers                   bool
+			RetargetChildrenOnMerge                  bool
+			DelayCheckForInactiveDays                int
+			DefaultDeleteBranchAfterMerge            bool
+			DefaultTitleSource                       string
 		} `ini:"repository.pull-request"`
 
 		// Issue Setting
 		Issue struct {
 			LockReasons []string
+			MaxPinned   int
 		} `ini:"repository.issue"`
 
+		Release struct {
+			AllowedTypes     string
+			DefaultPagingNum int
+			FileMaxSize      int64
+			MaxFiles         int
+		} `ini:"repository.release"`
+
 		Signing struct {
-			SigningKey    string
-			SigningName   string
-			SigningEmail  string
-			InitialCommit []string
-			CRUDActions   []string `ini:"CRUD_ACTIONS"`
-			Merges        []string
-			Wiki          []string
+			SigningKey        string
+			SigningName       string
+			SigningEmail      string
+			SigningFormat     string
+			InitialCommit     []string
+			CRUDActions       []string `ini:"CRUD_ACTIONS"`
+			Merges            []string
+			Wiki              []string
+			DefaultTrustModel string
+			TrustedSSHKeys    []string `ini:"TRUSTED_SSH_KEYS"`
 		} `ini:"repository.signing"`
 	}{
-		DetectedCharsetsOrder: []string{
-			"UTF-8",
-			"UTF-16BE",
-			"UTF-16LE",
-			"UTF-32BE",
-			"UTF-32LE",
-			"ISO-8859-1",
-			"windows-1252",
-			"ISO-8859-2",
-			"windows-1250",
-			"ISO-8859-5",
-			"ISO-8859-6",
-			"ISO-8859-7",
-			"windows-1253",
-			"ISO-8859-8-I",
-			"windows-1255",
-			"ISO-8859-8",
-			"windows-1251",
-			"windows-1256",
-			"KOI8-R",
-			"ISO-8859-9",
-			"windows-1254",
-			"Shift_JIS",
-			"GB18030",
-			"EUC-JP",
-			"EUC-KR",
-			"Big5",
-			"ISO-2022-JP",
-			"ISO-2022-KR",
-			"ISO-2022-CN",
-			"IBM424_rtl",
-			"IBM424_ltr",
-			"IBM420_rtl",
-			"IBM420_ltr",
-		},
+		DetectedCharsetsOrder:                   DefaultDetectedCharsetsOrder(),
 		DetectedCharsetScore:                    map[string]int{},
 		AnsiCharset:                             "",
 		ForcePrivate:                            false,
 		DefaultPrivate:                          RepoCreatingLastUserVisibility,
+		DefaultPushCreatePrivate:                true,
 		MaxCreationLimit:                        -1,
-		MirrorQueueLength:                       1000,
-		PullRequestQueueLength:                  1000,
-		PreferredLicenses:                       []string{"Apache License 2.0,MIT License"},
+		UserMaxCreationLimit:                    -1,
+		OrgMaxCreationLimit:                     -1,
+		PreferredLicenses:                       []string{"Apache License 2.0", "MIT License"},
 		DisableHTTPGit:                          false,
 		AccessControlAllowOrigin:                "",
 		UseCompatSSHURI:                         false,
@@ -143,38 +145,35 @@ var (
 		EnablePushCreateOrg:                     false,
 		DisabledRepoUnits:                       []string{},
 		DefaultRepoUnits:                        []string{},
+		DefaultForkRepoUnits:                    []string{},
+		DefaultMirrorRepoUnits:                  []string{},
+		DefaultTemplateRepoUnits:                []string{},
 		PrefixArchiveFiles:                      true,
-		DisableMirrors:                          false,
+		DisableMigrations:                       false,
+		DisableStars:                            false,
+		DefaultBranch:                           "main",
+		DefaultObjectFormat:                     "sha1",
+		AllowForkWithoutMaximumLimit:            true,
+		StreamArchives:                          true,
 
 		// Repository editor settings
 		Editor: struct {
-			LineWrapExtensions   []string
-			PreviewableFileModes []string
+			LineWrapExtensions []string
 		}{
-			LineWrapExtensions:   strings.Split(".txt,.md,.markdown,.mdown,.mkd,", ","),
-			PreviewableFileModes: []string{"markdown"},
+			LineWrapExtensions: strings.Split(".txt,.md,.markdown,.mdown,.mkd,.livemd,", ","),
 		},
 
 		// Repository upload settings
 		Upload: struct {
 			Enabled      bool
-			TempPath     string
-			AllowedTypes []string `delim:"|"`
+			AllowedTypes string
 			FileMaxSize  int64
 			MaxFiles     int
 		}{
 			Enabled:      true,
-			TempPath:     "data/tmp/uploads",
-			AllowedTypes: []string{},
-			FileMaxSize:  3,
+			AllowedTypes: "",
+			FileMaxSize:  50,
 			MaxFiles:     5,
-		},
-
-		// Repository local settings
-		Local: struct {
-			LocalCopyPath string
-		}{
-			LocalCopyPath: "tmp/local-repo",
 		},
 
 		// Pull request settings
@@ -182,92 +181,183 @@ var (
 			WorkInProgressPrefixes                   []string
 			CloseKeywords                            []string
 			ReopenKeywords                           []string
+			DefaultMergeStyle                        string
 			DefaultMergeMessageCommitsLimit          int
 			DefaultMergeMessageSize                  int
 			DefaultMergeMessageAllAuthors            bool
 			DefaultMergeMessageMaxApprovers          int
 			DefaultMergeMessageOfficialApproversOnly bool
+			DefaultSquashMergeMessage                string
+			AddCoCommitterTrailers                   bool
+			RetargetChildrenOnMerge                  bool
+			DelayCheckForInactiveDays                int
+			DefaultDeleteBranchAfterMerge            bool
+			DefaultTitleSource                       string
 		}{
 			WorkInProgressPrefixes: []string{"WIP:", "[WIP]"},
 			// Same as GitHub. See
 			// https://help.github.com/articles/closing-issues-via-commit-messages
 			CloseKeywords:                            strings.Split("close,closes,closed,fix,fixes,fixed,resolve,resolves,resolved", ","),
 			ReopenKeywords:                           strings.Split("reopen,reopens,reopened", ","),
+			DefaultMergeStyle:                        "merge",
 			DefaultMergeMessageCommitsLimit:          50,
 			DefaultMergeMessageSize:                  5 * 1024,
 			DefaultMergeMessageAllAuthors:            false,
 			DefaultMergeMessageMaxApprovers:          10,
 			DefaultMergeMessageOfficialApproversOnly: true,
+			DefaultSquashMergeMessage:                "PR_BODY",
+			AddCoCommitterTrailers:                   true,
+			RetargetChildrenOnMerge:                  true,
+			DelayCheckForInactiveDays:                7,
+			DefaultDeleteBranchAfterMerge:            true,
+			DefaultTitleSource:                       RepoPRTitleSourceAuto,
 		},
 
 		// Issue settings
 		Issue: struct {
 			LockReasons []string
+			MaxPinned   int
 		}{
 			LockReasons: strings.Split("Too heated,Off-topic,Spam,Resolved", ","),
+			MaxPinned:   3,
+		},
+
+		Release: struct {
+			AllowedTypes     string
+			DefaultPagingNum int
+			FileMaxSize      int64
+			MaxFiles         int
+		}{
+			AllowedTypes:     "",
+			DefaultPagingNum: 10,
+			FileMaxSize:      2048,
+			MaxFiles:         5,
 		},
 
 		// Signing settings
 		Signing: struct {
-			SigningKey    string
-			SigningName   string
-			SigningEmail  string
-			InitialCommit []string
-			CRUDActions   []string `ini:"CRUD_ACTIONS"`
-			Merges        []string
-			Wiki          []string
+			SigningKey        string
+			SigningName       string
+			SigningEmail      string
+			SigningFormat     string
+			InitialCommit     []string
+			CRUDActions       []string `ini:"CRUD_ACTIONS"`
+			Merges            []string
+			Wiki              []string
+			DefaultTrustModel string
+			TrustedSSHKeys    []string `ini:"TRUSTED_SSH_KEYS"`
 		}{
-			SigningKey:    "default",
-			SigningName:   "",
-			SigningEmail:  "",
-			InitialCommit: []string{"always"},
-			CRUDActions:   []string{"pubkey", "twofa", "parentsigned"},
-			Merges:        []string{"pubkey", "twofa", "basesigned", "commitssigned"},
-			Wiki:          []string{"never"},
+			SigningKey:        "default",
+			SigningName:       "",
+			SigningEmail:      "",
+			SigningFormat:     "openpgp", // git.SigningKeyFormatOpenPGP
+			InitialCommit:     []string{"always"},
+			CRUDActions:       []string{"pubkey", "twofa", "parentsigned"},
+			Merges:            []string{"pubkey", "twofa", "basesigned", "commitssigned"},
+			Wiki:              []string{"never"},
+			DefaultTrustModel: "collaborator",
+			TrustedSSHKeys:    []string{},
 		},
 	}
 	RepoRootPath string
 	ScriptType   = "bash"
 )
 
-func newRepository() {
-	homeDir, err := com.HomeDir()
-	if err != nil {
-		log.Fatal("Failed to get home directory: %v", err)
+func DefaultDetectedCharsetsOrder() []string {
+	return []string{
+		"UTF-8",
+		"UTF-16BE",
+		"UTF-16LE",
+		"UTF-32BE",
+		"UTF-32LE",
+		"ISO-8859-1",
+		"windows-1252",
+		"ISO-8859-2",
+		"windows-1250",
+		"ISO-8859-5",
+		"ISO-8859-6",
+		"ISO-8859-7",
+		"windows-1253",
+		"ISO-8859-8-I",
+		"windows-1255",
+		"ISO-8859-8",
+		"windows-1251",
+		"windows-1256",
+		"KOI8-R",
+		"ISO-8859-9",
+		"windows-1254",
+		"Shift_JIS",
+		"GB18030",
+		"EUC-JP",
+		"EUC-KR",
+		"Big5",
+		"ISO-2022-JP",
+		"ISO-2022-KR",
+		"ISO-2022-CN",
 	}
-	homeDir = strings.Replace(homeDir, "\\", "/", -1)
+}
 
+func loadRepositoryFrom(rootCfg ConfigProvider) {
+	var err error
 	// Determine and create root git repository path.
-	sec := Cfg.Section("repository")
+	sec := rootCfg.Section("repository")
 	Repository.DisableHTTPGit = sec.Key("DISABLE_HTTP_GIT").MustBool()
 	Repository.UseCompatSSHURI = sec.Key("USE_COMPAT_SSH_URI").MustBool()
-	Repository.MaxCreationLimit = sec.Key("MAX_CREATION_LIMIT").MustInt(-1)
-	Repository.DefaultBranch = sec.Key("DEFAULT_BRANCH").MustString("master")
-	RepoRootPath = sec.Key("ROOT").MustString(path.Join(homeDir, "gitea-repositories"))
-	forcePathSeparator(RepoRootPath)
+	Repository.GoGetCloneURLProtocol = sec.Key("GO_GET_CLONE_URL_PROTOCOL").String()
+	// MAX_CREATION_LIMIT is a shortcut that sets the default for the two per-type limits below.
+	// USER_/ORG_MAX_CREATION_LIMIT take precedence when explicitly set.
+	Repository.MaxCreationLimit = sec.Key("MAX_CREATION_LIMIT").MustInt(-1)                                   // FIXME: INI-MUST-SIDE-EFFECT
+	Repository.UserMaxCreationLimit = sec.Key("USER_MAX_CREATION_LIMIT").MustInt(Repository.MaxCreationLimit) // FIXME: INI-MUST-SIDE-EFFECT
+	Repository.OrgMaxCreationLimit = sec.Key("ORG_MAX_CREATION_LIMIT").MustInt(Repository.MaxCreationLimit)   // FIXME: INI-MUST-SIDE-EFFECT
+	Repository.DefaultBranch = sec.Key("DEFAULT_BRANCH").MustString(Repository.DefaultBranch)
+	RepoRootPath = sec.Key("ROOT").MustString(filepath.Join(AppDataPath, "gitea-repositories"))
 	if !filepath.IsAbs(RepoRootPath) {
 		RepoRootPath = filepath.Join(AppWorkPath, RepoRootPath)
 	} else {
 		RepoRootPath = filepath.Clean(RepoRootPath)
 	}
+
+	checkOverlappedPath("[repository].ROOT", RepoRootPath)
+
 	defaultDetectedCharsetsOrder := make([]string, 0, len(Repository.DetectedCharsetsOrder))
 	for _, charset := range Repository.DetectedCharsetsOrder {
 		defaultDetectedCharsetsOrder = append(defaultDetectedCharsetsOrder, strings.ToLower(strings.TrimSpace(charset)))
 	}
 	ScriptType = sec.Key("SCRIPT_TYPE").MustString("bash")
 
-	if err = Cfg.Section("repository").MapTo(&Repository); err != nil {
+	if _, err := exec.LookPath(ScriptType); err != nil {
+		log.Warn("SCRIPT_TYPE %q is not on the current PATH. Are you sure that this is the correct SCRIPT_TYPE?", ScriptType)
+	}
+
+	if err = sec.MapTo(&Repository); err != nil {
 		log.Fatal("Failed to map Repository settings: %v", err)
-	} else if err = Cfg.Section("repository.editor").MapTo(&Repository.Editor); err != nil {
+	} else if err = rootCfg.Section("repository.editor").MapTo(&Repository.Editor); err != nil {
 		log.Fatal("Failed to map Repository.Editor settings: %v", err)
-	} else if err = Cfg.Section("repository.upload").MapTo(&Repository.Upload); err != nil {
+	} else if err = rootCfg.Section("repository.upload").MapTo(&Repository.Upload); err != nil {
 		log.Fatal("Failed to map Repository.Upload settings: %v", err)
-	} else if err = Cfg.Section("repository.local").MapTo(&Repository.Local); err != nil {
-		log.Fatal("Failed to map Repository.Local settings: %v", err)
-	} else if err = Cfg.Section("repository.pull-request").MapTo(&Repository.PullRequest); err != nil {
+	} else if err = rootCfg.Section("repository.pull-request").MapTo(&Repository.PullRequest); err != nil {
 		log.Fatal("Failed to map Repository.PullRequest settings: %v", err)
 	}
 
+	if !slices.Contains([]string{"BLANK", "COMMIT_MESSAGES", "PR_BODY"}, Repository.PullRequest.DefaultSquashMergeMessage) { // uppercase unlike other config values, to match GitHub's squash_merge_commit_message which the API also uses
+		log.Fatal("Invalid repository.pull-request.DEFAULT_SQUASH_MERGE_MESSAGE: %s", Repository.PullRequest.DefaultSquashMergeMessage)
+	}
+
+	if !rootCfg.Section("packages").Key("ENABLED").MustBool(Packages.Enabled) {
+		Repository.DisabledRepoUnits = append(Repository.DisabledRepoUnits, "repo.packages")
+	}
+
+	if !rootCfg.Section("actions").Key("ENABLED").MustBool(Actions.Enabled) {
+		Repository.DisabledRepoUnits = append(Repository.DisabledRepoUnits, "repo.actions")
+	}
+
+	// Handle default trustmodel settings
+	Repository.Signing.DefaultTrustModel = strings.ToLower(strings.TrimSpace(Repository.Signing.DefaultTrustModel))
+	if Repository.Signing.DefaultTrustModel == "default" {
+		Repository.Signing.DefaultTrustModel = "collaborator"
+	}
+
+	// Handle preferred charset orders
 	preferred := make([]string, 0, len(Repository.DetectedCharsetsOrder))
 	for _, charset := range Repository.DetectedCharsetsOrder {
 		canonicalCharset := strings.ToLower(strings.TrimSpace(charset))
@@ -300,7 +390,7 @@ func newRepository() {
 		}
 	}
 
-	if !filepath.IsAbs(Repository.Upload.TempPath) {
-		Repository.Upload.TempPath = path.Join(AppWorkPath, Repository.Upload.TempPath)
+	if err := loadRepoArchiveFrom(rootCfg); err != nil {
+		log.Fatal("loadRepoArchiveFrom: %v", err)
 	}
 }

@@ -1,12 +1,10 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package util
 
 import (
 	"net/url"
-	"path"
 	"strings"
 )
 
@@ -20,23 +18,11 @@ func PathEscapeSegments(path string) string {
 	return escapedPath
 }
 
-// URLJoin joins url components, like path.Join, but preserving contents
-func URLJoin(base string, elems ...string) string {
-	if !strings.HasSuffix(base, "/") {
-		base += "/"
-	}
-	baseURL, err := url.Parse(base)
+func SanitizeURL(s string) (string, error) {
+	u, err := url.Parse(s)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	joinedPath := path.Join(elems...)
-	argURL, err := url.Parse(joinedPath)
-	if err != nil {
-		return ""
-	}
-	joinedURL := baseURL.ResolveReference(argURL).String()
-	if !baseURL.IsAbs() && !strings.HasPrefix(base, "/") {
-		return joinedURL[1:] // Removing leading '/' if needed
-	}
-	return joinedURL
+	u.User = nil
+	return u.String(), nil
 }

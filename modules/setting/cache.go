@@ -1,83 +1,76 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package setting
 
 import (
-	"strings"
+	"math"
 	"time"
 
-	"code.gitea.io/gitea/modules/log"
+	"gitea.dev/modules/log"
 )
 
 // Cache represents cache settings
 type Cache struct {
-	Enabled  bool
 	Adapter  string
-	Interval int
-	Conn     string
+	Interval int           // GC
+	Conn     string        `ini:"-"`
 	TTL      time.Duration `ini:"ITEM_TTL"`
 }
 
-var (
-	// CacheService the global cache
-	CacheService = struct {
-		Cache
+// CacheService the global cache
+var CacheService = struct {
+	Cache `ini:"cache"`
 
-		LastCommit struct {
-			Enabled      bool
-			TTL          time.Duration `ini:"ITEM_TTL"`
-			CommitsCount int64
-		} `ini:"cache.last_commit"`
+	LastCommit struct {
+		TTL time.Duration `ini:"ITEM_TTL"`
+	} `ini:"cache.last_commit"`
+}{
+	Cache: Cache{
+		Adapter:  "memory",
+		Interval: 60,
+		TTL:      16 * time.Hour,
+	},
+	LastCommit: struct {
+		TTL time.Duration `ini:"ITEM_TTL"`
 	}{
-		Cache: Cache{
-			Enabled:  true,
-			Adapter:  "memory",
-			Interval: 60,
-			TTL:      16 * time.Hour,
-		},
-		LastCommit: struct {
-			Enabled      bool
-			TTL          time.Duration `ini:"ITEM_TTL"`
-			CommitsCount int64
-		}{
-			Enabled:      true,
-			TTL:          8760 * time.Hour,
-			CommitsCount: 1000,
-		},
-	}
-)
+		TTL: 8760 * time.Hour,
+	},
+}
 
-func newCacheService() {
-	sec := Cfg.Section("cache")
+func loadCacheFrom(rootCfg ConfigProvider) {
+	sec := rootCfg.Section("cache")
 	if err := sec.MapTo(&CacheService); err != nil {
 		log.Fatal("Failed to map Cache settings: %v", err)
 	}
 
-	CacheService.Adapter = sec.Key("ADAPTER").In("memory", []string{"memory", "redis", "memcache"})
+	CacheService.Adapter = sec.Key("ADAPTER").In("memory", []string{"memory", "redis", "memcache", "twoqueue"})
 	switch CacheService.Adapter {
 	case "memory":
-	case "redis", "memcache":
-		CacheService.Conn = strings.Trim(sec.Key("HOST").String(), "\" ")
-	case "": // disable cache
-		CacheService.Enabled = false
+	case "memcache":
+		CacheService.Conn = sec.Key("HOST").String()
+	case "redis":
+		CacheService.Conn = sec.Key("HOST").MustString(Redis.ConnStr)
+	case "twoqueue":
+		CacheService.Conn = sec.Key("HOST").MustString("50000")
 	default:
 		log.Fatal("Unknown cache adapter: %s", CacheService.Adapter)
 	}
+}
 
-	if CacheService.Enabled {
-		log.Info("Cache Service Enabled")
+// TTLSeconds returns the item TTL in seconds, negative when ITEM_TTL disables caching
+func (c Cache) TTLSeconds() int64 {
+	return ttlSeconds(c.TTL)
+}
+
+// LastCommitCacheTTLSeconds returns the last commit item TTL in seconds, negative when ITEM_TTL disables caching
+func LastCommitCacheTTLSeconds() int64 {
+	return ttlSeconds(CacheService.LastCommit.TTL)
+}
+
+func ttlSeconds(ttl time.Duration) int64 {
+	if ttl < 0 {
+		return -1
 	}
-
-	sec = Cfg.Section("cache.last_commit")
-	if !CacheService.Enabled {
-		CacheService.LastCommit.Enabled = false
-	}
-
-	CacheService.LastCommit.CommitsCount = sec.Key("COMMITS_COUNT").MustInt64(1000)
-
-	if CacheService.LastCommit.Enabled {
-		log.Info("Last Commit Cache Service Enabled")
-	}
+	return int64(math.Ceil(ttl.Seconds()))
 }

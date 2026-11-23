@@ -1,14 +1,12 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package graceful
 
 import (
 	"os"
-	"runtime"
 
-	"code.gitea.io/gitea/modules/log"
+	"gitea.dev/modules/log"
 )
 
 // awaitShutdown waits for the shutdown signal from the Manager
@@ -26,9 +24,7 @@ func (srv *Server) awaitShutdown() {
 	srv.doHammer()
 }
 
-// shutdown closes the listener so that no new connections are accepted
-// and starts a goroutine that will hammer (stop all running requests) the server
-// after setting.GracefulHammerTime.
+// doShutdown closes the listener so that no new connections are accepted, then runs OnShutdown
 func (srv *Server) doShutdown() {
 	// only shutdown if we're running.
 	if srv.getState() != stateRunning {
@@ -37,38 +33,20 @@ func (srv *Server) doShutdown() {
 
 	srv.setState(stateShuttingDown)
 
-	if srv.OnShutdown != nil {
-		srv.OnShutdown()
-	}
 	err := srv.listener.Close()
 	if err != nil {
 		log.Error("PID: %d Listener.Close() error: %v", os.Getpid(), err)
 	} else {
 		log.Info("PID: %d Listener (%s) closed.", os.Getpid(), srv.listener.Addr())
 	}
+	if srv.OnShutdown != nil {
+		srv.OnShutdown()
+	}
 }
 
 func (srv *Server) doHammer() {
-	defer func() {
-		// We call srv.wg.Done() until it panics.
-		// This happens if we call Done() when the WaitGroup counter is already at 0
-		// So if it panics -> we're done, Serve() will return and the
-		// parent will goroutine will exit.
-		if r := recover(); r != nil {
-			log.Error("WaitGroup at 0: Error: %v", r)
-		}
-	}()
 	if srv.getState() != stateShuttingDown {
 		return
 	}
-	log.Warn("Forcefully shutting down parent")
-	for {
-		if srv.getState() == stateTerminate {
-			break
-		}
-		srv.wg.Done()
-
-		// Give other goroutines a chance to finish before we forcibly stop them.
-		runtime.Gosched()
-	}
+	srv.closeAllConnections()
 }

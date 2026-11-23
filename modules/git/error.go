@@ -1,29 +1,14 @@
 // Copyright 2015 The Gogs Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package git
 
 import (
 	"fmt"
 	"strings"
-	"time"
+
+	"gitea.dev/modules/util"
 )
-
-// ErrExecTimeout error when exec timed out
-type ErrExecTimeout struct {
-	Duration time.Duration
-}
-
-// IsErrExecTimeout if some error is ErrExecTimeout
-func IsErrExecTimeout(err error) bool {
-	_, ok := err.(ErrExecTimeout)
-	return ok
-}
-
-func (err ErrExecTimeout) Error() string {
-	return fmt.Sprintf("execution is timeout [duration: %v]", err.Duration)
-}
 
 // ErrNotExist commit not exist error
 type ErrNotExist struct {
@@ -41,35 +26,8 @@ func (err ErrNotExist) Error() string {
 	return fmt.Sprintf("object does not exist [id: %s, rel_path: %s]", err.ID, err.RelPath)
 }
 
-// ErrBadLink entry.FollowLink error
-type ErrBadLink struct {
-	Name    string
-	Message string
-}
-
-func (err ErrBadLink) Error() string {
-	return fmt.Sprintf("%s: %s", err.Name, err.Message)
-}
-
-// IsErrBadLink if some error is ErrBadLink
-func IsErrBadLink(err error) bool {
-	_, ok := err.(ErrBadLink)
-	return ok
-}
-
-// ErrUnsupportedVersion error when required git version not matched
-type ErrUnsupportedVersion struct {
-	Required string
-}
-
-// IsErrUnsupportedVersion if some error is ErrUnsupportedVersion
-func IsErrUnsupportedVersion(err error) bool {
-	_, ok := err.(ErrUnsupportedVersion)
-	return ok
-}
-
-func (err ErrUnsupportedVersion) Error() string {
-	return fmt.Sprintf("Operation requires higher version [required: %s]", err.Required)
+func (err ErrNotExist) Unwrap() error {
+	return util.ErrNotExist
 }
 
 // ErrBranchNotExist represents a "BranchNotExist" kind of error.
@@ -87,7 +45,11 @@ func (err ErrBranchNotExist) Error() string {
 	return fmt.Sprintf("branch does not exist [name: %s]", err.Name)
 }
 
-// ErrPushOutOfDate represents an error if merging fails due to unrelated histories
+func (err ErrBranchNotExist) Unwrap() error {
+	return util.ErrNotExist
+}
+
+// ErrPushOutOfDate represents an error if merging fails due to the base branch being updated
 type ErrPushOutOfDate struct {
 	StdOut string
 	StdErr string
@@ -106,7 +68,7 @@ func (err *ErrPushOutOfDate) Error() string {
 
 // Unwrap unwraps the underlying error
 func (err *ErrPushOutOfDate) Unwrap() error {
-	return fmt.Errorf("%v - %s", err.Err, err.StdErr)
+	return fmt.Errorf("%w - %s", err.Err, err.StdErr)
 }
 
 // ErrPushRejected represents an error if merging fails due to rejection from a hook
@@ -129,33 +91,36 @@ func (err *ErrPushRejected) Error() string {
 
 // Unwrap unwraps the underlying error
 func (err *ErrPushRejected) Unwrap() error {
-	return fmt.Errorf("%v - %s", err.Err, err.StdErr)
+	return fmt.Errorf("%w - %s", err.Err, err.StdErr)
 }
 
 // GenerateMessage generates the remote message from the stderr
 func (err *ErrPushRejected) GenerateMessage() {
-	messageBuilder := &strings.Builder{}
-	i := strings.Index(err.StdErr, "remote: ")
-	if i < 0 {
-		err.Message = ""
+	// The stderr is like this:
+	//
+	// > remote: error: push is rejected .....
+	// > To /work/gitea/tests/integration/gitea-integration-sqlite/gitea-repositories/user2/repo1.git
+	// >  ! [remote rejected] 44e67c77559211d21b630b902cdcc6ab9d4a4f51 -> develop (pre-receive hook declined)
+	// > error: failed to push some refs to '/work/gitea/tests/integration/gitea-integration-sqlite/gitea-repositories/user2/repo1.git'
+	//
+	// The local message contains sensitive information, so we only need the remote message
+	const prefixRemote = "remote: "
+	const prefixError = "error: "
+	pos := strings.Index(err.StdErr, prefixRemote)
+	if pos < 0 {
+		err.Message = "push is rejected"
 		return
 	}
-	for {
-		if len(err.StdErr) <= i+8 {
-			break
+
+	messageBuilder := &strings.Builder{}
+	lines := strings.SplitSeq(err.StdErr, "\n")
+	for line := range lines {
+		line, ok := strings.CutPrefix(line, prefixRemote)
+		if !ok {
+			continue
 		}
-		if err.StdErr[i:i+8] != "remote: " {
-			break
-		}
-		i += 8
-		nl := strings.IndexByte(err.StdErr[i:], '\n')
-		if nl >= 0 {
-			messageBuilder.WriteString(err.StdErr[i : i+nl+1])
-			i = i + nl + 1
-		} else {
-			messageBuilder.WriteString(err.StdErr[i:])
-			i = len(err.StdErr)
-		}
+		line = strings.TrimPrefix(line, prefixError)
+		messageBuilder.WriteString(strings.TrimSpace(line) + "\n")
 	}
 	err.Message = strings.TrimSpace(messageBuilder.String())
 }

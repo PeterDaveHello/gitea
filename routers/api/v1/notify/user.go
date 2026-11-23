@@ -1,17 +1,18 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package notify
 
 import (
 	"net/http"
-	"strings"
 	"time"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/routers/api/v1/utils"
+	activities_model "gitea.dev/models/activities"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/structs"
+	"gitea.dev/services/context"
+	"gitea.dev/services/convert"
+	"gitea.dev/services/notifications"
 )
 
 // ListNotifications list users's notification threads
@@ -27,8 +28,7 @@ func ListNotifications(ctx *context.APIContext) {
 	// - name: all
 	//   in: query
 	//   description: If true, show notifications marked as read. Default value is false
-	//   type: string
-	//   required: false
+	//   type: boolean
 	// - name: status-types
 	//   in: query
 	//   description: "Show notifications with the provided status types. Options are: unread, read and/or pinned. Defaults to unread & pinned."
@@ -36,19 +36,24 @@ func ListNotifications(ctx *context.APIContext) {
 	//   collectionFormat: multi
 	//   items:
 	//     type: string
-	//   required: false
+	// - name: subject-type
+	//   in: query
+	//   description: "filter notifications by subject type"
+	//   type: array
+	//   collectionFormat: multi
+	//   items:
+	//     type: string
+	//     enum: [issue,pull,commit,repository]
 	// - name: since
 	//   in: query
 	//   description: Only show notifications updated after the given time. This is a timestamp in RFC 3339 format
 	//   type: string
 	//   format: date-time
-	//   required: false
 	// - name: before
 	//   in: query
 	//   description: Only show notifications updated before the given time. This is a timestamp in RFC 3339 format
 	//   type: string
 	//   format: date-time
-	//   required: false
 	// - name: page
 	//   in: query
 	//   description: page number of results to return (1-based)
@@ -60,34 +65,31 @@ func ListNotifications(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/NotificationThreadList"
-
-	before, since, err := utils.GetQueryBeforeSince(ctx)
-	if err != nil {
-		ctx.InternalServerError(err)
-		return
-	}
-	opts := models.FindNotificationOptions{
-		ListOptions:       utils.GetListOptions(ctx),
-		UserID:            ctx.User.ID,
-		UpdatedBeforeUnix: before,
-		UpdatedAfterUnix:  since,
-	}
-	if !ctx.QueryBool("all") {
-		statuses := ctx.QueryStrings("status-types")
-		opts.Status = statusStringsToNotificationStatuses(statuses, []string{"unread", "pinned"})
-	}
-	nl, err := models.GetNotifications(opts)
-	if err != nil {
-		ctx.InternalServerError(err)
-		return
-	}
-	err = nl.LoadAttributes()
-	if err != nil {
-		ctx.InternalServerError(err)
+	opts := getFindNotificationOptions(ctx)
+	if ctx.Written() {
 		return
 	}
 
-	ctx.JSON(http.StatusOK, nl.APIFormat())
+	totalCount, err := db.Count[activities_model.Notification](ctx, opts)
+	if err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+
+	nl, err := db.Find[activities_model.Notification](ctx, opts)
+	if err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+	err = activities_model.NotificationList(nl).LoadAttributes(ctx)
+	if err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+
+	ctx.SetLinkHeader(totalCount, opts.PageSize)
+	ctx.SetTotalCountHeader(totalCount)
+	ctx.JSON(http.StatusOK, convert.ToNotifications(ctx, nl))
 }
 
 // ReadNotifications mark notification threads as read, unread, or pinned
@@ -126,47 +128,49 @@ func ReadNotifications(ctx *context.APIContext) {
 	//   required: false
 	// responses:
 	//   "205":
-	//     "$ref": "#/responses/empty"
+	//     "$ref": "#/responses/NotificationThreadList"
 
 	lastRead := int64(0)
-	qLastRead := strings.Trim(ctx.Query("last_read_at"), " ")
+	qLastRead := ctx.FormTrim("last_read_at")
 	if len(qLastRead) > 0 {
 		tmpLastRead, err := time.Parse(time.RFC3339, qLastRead)
 		if err != nil {
-			ctx.InternalServerError(err)
+			ctx.APIError(http.StatusBadRequest, err.Error())
 			return
 		}
 		if !tmpLastRead.IsZero() {
 			lastRead = tmpLastRead.Unix()
 		}
 	}
-	opts := models.FindNotificationOptions{
-		UserID:            ctx.User.ID,
+	opts := &activities_model.FindNotificationOptions{
+		UserID:            ctx.Doer.ID,
 		UpdatedBeforeUnix: lastRead,
 	}
-	if !ctx.QueryBool("all") {
-		statuses := ctx.QueryStrings("status-types")
+	if !ctx.FormBool("all") {
+		statuses := ctx.FormStrings("status-types")
 		opts.Status = statusStringsToNotificationStatuses(statuses, []string{"unread"})
 	}
-	nl, err := models.GetNotifications(opts)
+	nl, err := db.Find[activities_model.Notification](ctx, opts)
 	if err != nil {
-		ctx.InternalServerError(err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
-	targetStatus := statusStringToNotificationStatus(ctx.Query("to-status"))
+	targetStatus := statusStringToNotificationStatus(ctx.FormString("to-status"))
 	if targetStatus == 0 {
-		targetStatus = models.NotificationStatusRead
+		targetStatus = activities_model.NotificationStatusRead
 	}
 
-	for _, n := range nl {
-		err := models.SetNotificationStatus(n.ID, ctx.User, targetStatus)
-		if err != nil {
-			ctx.InternalServerError(err)
-			return
-		}
-		ctx.Status(http.StatusResetContent)
+	updated, err := notifications.SetManyNotificationStatuses(ctx, nl, ctx.Doer, targetStatus)
+	if err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+	changed := make([]*structs.NotificationThread, 0, len(updated))
+	for _, notif := range updated {
+		_ = notif.LoadAttributes(ctx)
+		changed = append(changed, convert.ToNotificationThread(ctx, notif))
 	}
 
-	ctx.Status(http.StatusResetContent)
+	ctx.JSON(http.StatusResetContent, changed)
 }

@@ -1,12 +1,13 @@
 // Copyright 2015 The Gogs Authors. All rights reserved.
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package git
 
 import (
-	"io/ioutil"
+	"io"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,62 +15,62 @@ import (
 )
 
 func TestBlob_Data(t *testing.T) {
-	output := `Copyright (c) 2016 The Gitea Authors
-Copyright (c) 2015 The Gogs Authors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-`
-	repo, err := OpenRepository("../../.git")
-	assert.NoError(t, err)
+	output := "file2\n"
+	bareRepo1Path := filepath.Join(testReposDir, "repo1_bare")
+	repo, err := OpenRepositoryLocal(t.Context(), bareRepo1Path)
+	require.NoError(t, err)
 	defer repo.Close()
 
-	testBlob, err := repo.GetBlob("a8d4b49dd073a4a38a7e58385eeff7cc52568697")
+	testBlob, err := repo.GetBlob("6c493ff740f9380390d5c9ddef4af18697ac9375")
 	assert.NoError(t, err)
 
-	r, err := testBlob.DataAsync()
+	r, err := testBlob.DataAsync(t.Context())
 	assert.NoError(t, err)
 	require.NotNil(t, r)
-	defer r.Close()
 
-	data, err := ioutil.ReadAll(r)
+	data, err := io.ReadAll(r)
+	assert.NoError(t, r.Close())
+
 	assert.NoError(t, err)
 	assert.Equal(t, output, string(data))
 }
 
 func Benchmark_Blob_Data(b *testing.B) {
-	repo, err := OpenRepository("../../.git")
+	bareRepo1Path := filepath.Join(testReposDir, "repo1_bare")
+	repo, err := OpenRepositoryLocal(b.Context(), bareRepo1Path)
 	if err != nil {
 		b.Fatal(err)
 	}
 	defer repo.Close()
 
-	testBlob, err := repo.GetBlob("a8d4b49dd073a4a38a7e58385eeff7cc52568697")
+	testBlob, err := repo.GetBlob("6c493ff740f9380390d5c9ddef4af18697ac9375")
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	for i := 0; i < b.N; i++ {
-		r, err := testBlob.DataAsync()
+	for b.Loop() {
+		r, err := testBlob.DataAsync(b.Context())
 		if err != nil {
 			b.Fatal(err)
 		}
-		defer r.Close()
-		ioutil.ReadAll(r)
+		io.ReadAll(r)
+		_ = r.Close()
 	}
+}
+
+func TestGetBlobLineCount(t *testing.T) {
+	size, count, err := getBlobLineCount(strings.NewReader(""), nil)
+	assert.NoError(t, err)
+	assert.EqualValues(t, 0, size)
+	assert.Equal(t, 0, count)
+
+	size, count, err = getBlobLineCount(strings.NewReader("\n"), nil)
+	assert.NoError(t, err)
+	assert.EqualValues(t, 1, size)
+	assert.Equal(t, 1, count)
+
+	size, count, err = getBlobLineCount(strings.NewReader("a\nb"), nil)
+	assert.NoError(t, err)
+	assert.EqualValues(t, 3, size)
+	assert.Equal(t, 2, count)
 }

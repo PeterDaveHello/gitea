@@ -1,11 +1,7 @@
 {{template "base/head" .}}
-<div class="repository new issue">
+<div role="main" aria-label="{{.Title}}" class="page-content repository new issue">
 	{{template "repo/header" .}}
 	<div class="ui container">
-		<div class="navbar">
-			{{template "repo/issue/navbar" .}}
-		</div>
-		<div class="ui divider"></div>
 		{{template "repo/issue/new_form" .}}
 	</div>
 </div>

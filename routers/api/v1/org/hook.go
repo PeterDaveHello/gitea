@@ -1,20 +1,19 @@
 // Copyright 2016 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package org
 
 import (
 	"net/http"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/convert"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/routers/api/v1/utils"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/modules/web"
+	"gitea.dev/routers/api/v1/utils"
+	"gitea.dev/services/context"
+	webhook_service "gitea.dev/services/webhook"
 )
 
-// ListHooks list an organziation's webhooks
+// ListHooks list an organization's webhooks
 func ListHooks(ctx *context.APIContext) {
 	// swagger:operation GET /orgs/{org}/hooks organization orgListHooks
 	// ---
@@ -38,18 +37,13 @@ func ListHooks(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/HookList"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	org := ctx.Org.Organization
-	orgHooks, err := models.GetWebhooksByOrgID(org.ID, utils.GetListOptions(ctx))
-	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetWebhooksByOrgID", err)
-		return
-	}
-	hooks := make([]*api.Hook, len(orgHooks))
-	for i, hook := range orgHooks {
-		hooks[i] = convert.ToHook(org.HomeLink(), hook)
-	}
-	ctx.JSON(http.StatusOK, hooks)
+	utils.ListOwnerHooks(
+		ctx,
+		ctx.ContextUser,
+	)
 }
 
 // GetHook get an organization's hook by id
@@ -74,19 +68,25 @@ func GetHook(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/Hook"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	org := ctx.Org.Organization
-	hookID := ctx.ParamsInt64(":id")
-	hook, err := utils.GetOrgHook(ctx, org.ID, hookID)
+	hook, err := utils.GetOwnerHook(ctx, ctx.ContextUser.ID, ctx.PathParamInt64("id"))
 	if err != nil {
 		return
 	}
-	ctx.JSON(http.StatusOK, convert.ToHook(org.HomeLink(), hook))
+
+	apiHook, err := webhook_service.ToHook(ctx.ContextUser.HomeLink(), hook)
+	if err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+	ctx.JSON(http.StatusOK, apiHook)
 }
 
 // CreateHook create a hook for an organization
-func CreateHook(ctx *context.APIContext, form api.CreateHookOption) {
-	// swagger:operation POST /orgs/{org}/hooks/ organization orgCreateHook
+func CreateHook(ctx *context.APIContext) {
+	// swagger:operation POST /orgs/{org}/hooks organization orgCreateHook
 	// ---
 	// summary: Create a hook
 	// consumes:
@@ -107,16 +107,18 @@ func CreateHook(ctx *context.APIContext, form api.CreateHookOption) {
 	// responses:
 	//   "201":
 	//     "$ref": "#/responses/Hook"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	//TODO in body params
-	if !utils.CheckCreateHookOption(ctx, &form) {
-		return
-	}
-	utils.AddOrgHook(ctx, &form)
+	utils.AddOwnerHook(
+		ctx,
+		ctx.ContextUser,
+		web.GetForm[*api.CreateHookOption](ctx),
+	)
 }
 
-// EditHook modify a hook of a repository
-func EditHook(ctx *context.APIContext, form api.EditHookOption) {
+// EditHook modify a hook of an organization
+func EditHook(ctx *context.APIContext) {
 	// swagger:operation PATCH /orgs/{org}/hooks/{id} organization orgEditHook
 	// ---
 	// summary: Update a hook
@@ -143,10 +145,15 @@ func EditHook(ctx *context.APIContext, form api.EditHookOption) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/Hook"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	//TODO in body params
-	hookID := ctx.ParamsInt64(":id")
-	utils.EditOrgHook(ctx, &form, hookID)
+	utils.EditOwnerHook(
+		ctx,
+		ctx.ContextUser,
+		web.GetForm[*api.EditHookOption](ctx),
+		ctx.PathParamInt64("id"),
+	)
 }
 
 // DeleteHook delete a hook of an organization
@@ -171,16 +178,12 @@ func DeleteHook(ctx *context.APIContext) {
 	// responses:
 	//   "204":
 	//     "$ref": "#/responses/empty"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	org := ctx.Org.Organization
-	hookID := ctx.ParamsInt64(":id")
-	if err := models.DeleteWebhookByOrgID(org.ID, hookID); err != nil {
-		if models.IsErrWebhookNotExist(err) {
-			ctx.NotFound()
-		} else {
-			ctx.Error(http.StatusInternalServerError, "DeleteWebhookByOrgID", err)
-		}
-		return
-	}
-	ctx.Status(http.StatusNoContent)
+	utils.DeleteOwnerHook(
+		ctx,
+		ctx.ContextUser,
+		ctx.PathParamInt64("id"),
+	)
 }

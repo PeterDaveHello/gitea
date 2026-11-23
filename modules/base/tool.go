@@ -1,316 +1,111 @@
 // Copyright 2014 The Gogs Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package base
 
 import (
-	"crypto/md5"
+	"crypto/hmac"
 	"crypto/sha1"
 	"crypto/sha256"
-	"encoding/base64"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
-	"net/http"
-	"net/url"
-	"os"
-	"path"
-	"path/filepath"
-	"runtime"
+	"hash"
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
-	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-
-	"github.com/dustin/go-humanize"
-	"github.com/unknwon/com"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/util"
 )
 
-// EncodeMD5 encodes string to md5 hex value.
-func EncodeMD5(str string) string {
-	m := md5.New()
-	_, _ = m.Write([]byte(str))
-	return hex.EncodeToString(m.Sum(nil))
-}
-
-// EncodeSha1 string to sha1 hex value.
-func EncodeSha1(str string) string {
-	h := sha1.New()
-	_, _ = h.Write([]byte(str))
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// EncodeSha256 string to sha1 hex value.
+// EncodeSha256 string to sha256 hex value.
 func EncodeSha256(str string) string {
 	h := sha256.New()
-	_, _ = h.Write([]byte(str))
+	_, _ = h.Write(util.UnsafeStringToBytes(str))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
 // ShortSha is basically just truncating.
 // It is DEPRECATED and will be removed in the future.
 func ShortSha(sha1 string) string {
-	return TruncateString(sha1, 10)
-}
-
-// BasicAuthDecode decode basic auth string
-func BasicAuthDecode(encoded string) (string, string, error) {
-	s, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return "", "", err
-	}
-
-	auth := strings.SplitN(string(s), ":", 2)
-	return auth[0], auth[1], nil
-}
-
-// BasicAuthEncode encode basic auth string
-func BasicAuthEncode(username, password string) string {
-	return base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+	return util.TruncateRunes(sha1, 10)
 }
 
 // VerifyTimeLimitCode verify time limit code
-func VerifyTimeLimitCode(data string, minutes int, code string) bool {
+func VerifyTimeLimitCode(now time.Time, data string, minutes int, code string) bool {
 	if len(code) <= 18 {
 		return false
 	}
 
-	// split code
-	start := code[:12]
-	lives := code[12:18]
-	if d, err := com.StrTo(lives).Int(); err == nil {
-		minutes = d
+	startTimeStr := code[:12]
+	aliveTimeStr := code[12:18]
+	aliveTime, _ := strconv.Atoi(aliveTimeStr) // no need to check err, if anything wrong, the following code check will fail soon
+
+	// check code
+	retCode := CreateTimeLimitCode(data, aliveTime, startTimeStr, nil)
+	if subtle.ConstantTimeCompare([]byte(retCode), []byte(code)) != 1 {
+		return false
 	}
 
-	// right active code
-	retCode := CreateTimeLimitCode(data, minutes, start)
-	if retCode == code && minutes > 0 {
-		// check time is expired or not
-		before, _ := time.ParseInLocation("200601021504", start, time.Local)
-		now := time.Now()
-		if before.Add(time.Minute*time.Duration(minutes)).Unix() > now.Unix() {
-			return true
-		}
-	}
-
-	return false
+	// check time is expired or not: startTime <= now && now < startTime + minutes
+	startTime, _ := time.ParseInLocation("200601021504", startTimeStr, time.Local)
+	return (startTime.Before(now) || startTime.Equal(now)) && now.Before(startTime.Add(time.Minute*time.Duration(minutes)))
 }
 
 // TimeLimitCodeLength default value for time limit code
 const TimeLimitCodeLength = 12 + 6 + 40
 
-// CreateTimeLimitCode create a time limit code
-// code format: 12 length date time string + 6 minutes string + 40 sha1 encoded string
-func CreateTimeLimitCode(data string, minutes int, startInf interface{}) string {
-	format := "200601021504"
+// CreateTimeLimitCode create a time-limited code.
+// Format: 12 length date time string + 6 minutes string (not used) + 40 hash string, some other code depends on this fixed length
+// If h is nil, then use the default hmac hash.
+func CreateTimeLimitCode[T time.Time | string](data string, minutes int, startTimeGeneric T, h hash.Hash) string {
+	const format = "200601021504"
 
-	var start, end time.Time
-	var startStr, endStr string
-
-	if startInf == nil {
-		// Use now time create code
-		start = time.Now()
-		startStr = start.Format(format)
-	} else {
-		// use start string create code
-		startStr = startInf.(string)
-		start, _ = time.ParseInLocation(format, startStr, time.Local)
-		startStr = start.Format(format)
+	var start time.Time
+	switch startTime := any(startTimeGeneric).(type) {
+	case time.Time:
+		start = startTime
+	case string:
+		var err error
+		start, err = time.ParseInLocation(format, startTime, time.Local)
+		if err != nil {
+			return "" // return an invalid code because the "parse" failed
+		}
+	default:
+		panic(fmt.Sprintf("unsupported start time type %T", startTime)) // it shouldn't happen
 	}
+	startStr := start.Format(format)
+	end := start.Add(time.Minute * time.Duration(minutes))
 
-	end = start.Add(time.Minute * time.Duration(minutes))
-	endStr = end.Format(format)
-
-	// create sha1 encode string
-	sh := sha1.New()
-	_, _ = sh.Write([]byte(data + setting.SecretKey + startStr + endStr + com.ToStr(minutes)))
-	encoded := hex.EncodeToString(sh.Sum(nil))
+	if h == nil {
+		h = hmac.New(sha1.New, setting.GetGeneralTokenSigningSecret())
+	}
+	_, _ = fmt.Fprintf(h, "%s%s%s%s%d", data, hex.EncodeToString(setting.GetGeneralTokenSigningSecret()), startStr, end.Format(format), minutes)
+	encoded := hex.EncodeToString(h.Sum(nil))
 
 	code := fmt.Sprintf("%s%06d%s", startStr, minutes, encoded)
+	if len(code) != TimeLimitCodeLength {
+		panic("there is a hard requirement for the length of time-limited code") // it shouldn't happen
+	}
 	return code
-}
-
-// HashEmail hashes email address to MD5 string.
-// https://en.gravatar.com/site/implement/hash/
-func HashEmail(email string) string {
-	return EncodeMD5(strings.ToLower(strings.TrimSpace(email)))
-}
-
-// DefaultAvatarLink the default avatar link
-func DefaultAvatarLink() string {
-	return setting.AppSubURL + "/img/avatar_default.png"
-}
-
-// DefaultAvatarSize is a sentinel value for the default avatar size, as
-// determined by the avatar-hosting service.
-const DefaultAvatarSize = -1
-
-// libravatarURL returns the URL for the given email. This function should only
-// be called if a federated avatar service is enabled.
-func libravatarURL(email string) (*url.URL, error) {
-	urlStr, err := setting.LibravatarService.FromEmail(email)
-	if err != nil {
-		log.Error("LibravatarService.FromEmail(email=%s): error %v", email, err)
-		return nil, err
-	}
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		log.Error("Failed to parse libravatar url(%s): error %v", urlStr, err)
-		return nil, err
-	}
-	return u, nil
-}
-
-// SizedAvatarLink returns a sized link to the avatar for the given email
-// address.
-func SizedAvatarLink(email string, size int) string {
-	var avatarURL *url.URL
-	if setting.EnableFederatedAvatar && setting.LibravatarService != nil {
-		var err error
-		avatarURL, err = libravatarURL(email)
-		if err != nil {
-			return DefaultAvatarLink()
-		}
-	} else if !setting.DisableGravatar {
-		// copy GravatarSourceURL, because we will modify its Path.
-		copyOfGravatarSourceURL := *setting.GravatarSourceURL
-		avatarURL = &copyOfGravatarSourceURL
-		avatarURL.Path = path.Join(avatarURL.Path, HashEmail(email))
-	} else {
-		return DefaultAvatarLink()
-	}
-
-	vals := avatarURL.Query()
-	vals.Set("d", "identicon")
-	if size != DefaultAvatarSize {
-		vals.Set("s", strconv.Itoa(size))
-	}
-	avatarURL.RawQuery = vals.Encode()
-	return avatarURL.String()
-}
-
-// SizedAvatarLinkWithDomain returns a sized link to the avatar for the given email
-// address.
-func SizedAvatarLinkWithDomain(email string, size int) string {
-	var avatarURL *url.URL
-	if setting.EnableFederatedAvatar && setting.LibravatarService != nil {
-		var err error
-		avatarURL, err = libravatarURL(email)
-		if err != nil {
-			return DefaultAvatarLink()
-		}
-	} else if !setting.DisableGravatar {
-		// copy GravatarSourceURL, because we will modify its Path.
-		copyOfGravatarSourceURL := *setting.GravatarSourceURL
-		avatarURL = &copyOfGravatarSourceURL
-		avatarURL.Path = path.Join(avatarURL.Path, HashEmail(email))
-	} else {
-		return DefaultAvatarLink()
-	}
-
-	vals := avatarURL.Query()
-	vals.Set("d", "identicon")
-	if size != DefaultAvatarSize {
-		vals.Set("s", strconv.Itoa(size))
-	}
-	avatarURL.RawQuery = vals.Encode()
-	return avatarURL.String()
-}
-
-// FileSize calculates the file size and generate user-friendly string.
-func FileSize(s int64) string {
-	return humanize.IBytes(uint64(s))
-}
-
-// PrettyNumber produces a string form of the given number in base 10 with
-// commas after every three orders of magnitud
-func PrettyNumber(v int64) string {
-	return humanize.Comma(v)
-}
-
-// Subtract deals with subtraction of all types of number.
-func Subtract(left interface{}, right interface{}) interface{} {
-	var rleft, rright int64
-	var fleft, fright float64
-	var isInt = true
-	switch v := left.(type) {
-	case int:
-		rleft = int64(v)
-	case int8:
-		rleft = int64(v)
-	case int16:
-		rleft = int64(v)
-	case int32:
-		rleft = int64(v)
-	case int64:
-		rleft = v
-	case float32:
-		fleft = float64(v)
-		isInt = false
-	case float64:
-		fleft = v
-		isInt = false
-	}
-
-	switch v := right.(type) {
-	case int:
-		rright = int64(v)
-	case int8:
-		rright = int64(v)
-	case int16:
-		rright = int64(v)
-	case int32:
-		rright = int64(v)
-	case int64:
-		rright = v
-	case float32:
-		fright = float64(v)
-		isInt = false
-	case float64:
-		fright = v
-		isInt = false
-	}
-
-	if isInt {
-		return rleft - rright
-	}
-	return fleft + float64(rleft) - (fright + float64(rright))
-}
-
-// EllipsisString returns a truncated short string,
-// it appends '...' in the end of the length of string is too large.
-func EllipsisString(str string, length int) string {
-	if length <= 3 {
-		return "..."
-	}
-	if len(str) <= length {
-		return str
-	}
-	return str[:length-3] + "..."
-}
-
-// TruncateString returns a truncated string with given limit,
-// it returns input string if length is not reached limit.
-func TruncateString(str string, limit int) string {
-	if len(str) < limit {
-		return str
-	}
-	return str[:limit]
 }
 
 // StringsToInt64s converts a slice of string to a slice of int64.
 func StringsToInt64s(strs []string) ([]int64, error) {
-	ints := make([]int64, len(strs))
-	for i := range strs {
-		n, err := com.StrTo(strs[i]).Int64()
-		if err != nil {
-			return ints, err
+	if strs == nil {
+		return nil, nil
+	}
+	ints := make([]int64, 0, len(strs))
+	for _, s := range strs {
+		if s == "" {
+			continue
 		}
-		ints[i] = n
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		ints = append(ints, n)
 	}
 	return ints, nil
 }
@@ -324,99 +119,6 @@ func Int64sToStrings(ints []int64) []string {
 	return strs
 }
 
-// Int64sToMap converts a slice of int64 to a int64 map.
-func Int64sToMap(ints []int64) map[int64]bool {
-	m := make(map[int64]bool)
-	for _, i := range ints {
-		m[i] = true
-	}
-	return m
-}
-
-// Int64sContains returns if a int64 in a slice of int64
-func Int64sContains(intsSlice []int64, a int64) bool {
-	for _, c := range intsSlice {
-		if c == a {
-			return true
-		}
-	}
-	return false
-}
-
-// IsLetter reports whether the rune is a letter (category L).
-// https://github.com/golang/go/blob/master/src/go/scanner/scanner.go#L257
-func IsLetter(ch rune) bool {
-	return 'a' <= ch && ch <= 'z' || 'A' <= ch && ch <= 'Z' || ch == '_' || ch >= 0x80 && unicode.IsLetter(ch)
-}
-
-// IsTextFile returns true if file content format is plain text or empty.
-func IsTextFile(data []byte) bool {
-	if len(data) == 0 {
-		return true
-	}
-	return strings.Contains(http.DetectContentType(data), "text/")
-}
-
-// IsImageFile detects if data is an image format
-func IsImageFile(data []byte) bool {
-	return strings.Contains(http.DetectContentType(data), "image/")
-}
-
-// IsPDFFile detects if data is a pdf format
-func IsPDFFile(data []byte) bool {
-	return strings.Contains(http.DetectContentType(data), "application/pdf")
-}
-
-// IsVideoFile detects if data is an video format
-func IsVideoFile(data []byte) bool {
-	return strings.Contains(http.DetectContentType(data), "video/")
-}
-
-// IsAudioFile detects if data is an video format
-func IsAudioFile(data []byte) bool {
-	return strings.Contains(http.DetectContentType(data), "audio/")
-}
-
-// EntryIcon returns the octicon class for displaying files/directories
-func EntryIcon(entry *git.TreeEntry) string {
-	switch {
-	case entry.IsLink():
-		te, err := entry.FollowLink()
-		if err != nil {
-			log.Debug(err.Error())
-			return "file-symlink-file"
-		}
-		if te.IsDir() {
-			return "file-submodule"
-		}
-		return "file-symlink-file"
-	case entry.IsDir():
-		return "file-directory"
-	case entry.IsSubModule():
-		return "file-submodule"
-	}
-
-	return "file"
-}
-
-// SetupGiteaRoot Sets GITEA_ROOT if it is not already set and returns the value
-func SetupGiteaRoot() string {
-	giteaRoot := os.Getenv("GITEA_ROOT")
-	if giteaRoot == "" {
-		_, filename, _, _ := runtime.Caller(0)
-		giteaRoot = strings.TrimSuffix(filename, "modules/base/tool.go")
-		wd, err := os.Getwd()
-		if err != nil {
-			rel, err := filepath.Rel(giteaRoot, wd)
-			if err != nil && strings.HasPrefix(filepath.ToSlash(rel), "../") {
-				giteaRoot = wd
-			}
-		}
-		if _, err := os.Stat(filepath.Join(giteaRoot, "gitea")); os.IsNotExist(err) {
-			giteaRoot = ""
-		} else if err := os.Setenv("GITEA_ROOT", giteaRoot); err != nil {
-			giteaRoot = ""
-		}
-	}
-	return giteaRoot
+func JoinInt64s(ints []int64, sep string) string {
+	return strings.Join(Int64sToStrings(ints), sep)
 }

@@ -1,66 +1,65 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
+
 // This code is highly inspired by endless go
 
 package graceful
 
 import (
 	"crypto/tls"
-	"io/ioutil"
+	"fmt"
 	"net"
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
-	"code.gitea.io/gitea/modules/log"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/proxyprotocol"
+	"gitea.dev/modules/setting"
 )
 
-var (
-	// DefaultReadTimeOut default read timeout
-	DefaultReadTimeOut time.Duration
-	// DefaultWriteTimeOut default write timeout
-	DefaultWriteTimeOut time.Duration
-	// DefaultMaxHeaderBytes default max header bytes
-	DefaultMaxHeaderBytes int
-)
-
-func init() {
-	DefaultMaxHeaderBytes = 0 // use http.DefaultMaxHeaderBytes - which currently is 1 << 20 (1MB)
-}
+// GetListener returns a net listener
+// This determines the implementation of net.Listener which the server will use,
+// so that downstreams could provide their own Listener, such as with a hidden service or a p2p network
+var GetListener = DefaultGetListener
 
 // ServeFunction represents a listen.Accept loop
 type ServeFunction = func(net.Listener) error
 
 // Server represents our graceful server
 type Server struct {
-	network     string
-	address     string
-	listener    net.Listener
-	wg          sync.WaitGroup
-	state       state
-	lock        *sync.RWMutex
-	BeforeBegin func(network, address string)
-	OnShutdown  func()
+	network  string
+	address  string
+	listener net.Listener
+
+	lock          sync.RWMutex
+	state         state
+	connCounter   int64
+	connEmptyCond *sync.Cond
+
+	BeforeBegin          func(network, address string)
+	OnShutdown           func()
+	PerWriteTimeout      time.Duration
+	PerWritePerKbTimeout time.Duration
 }
 
 // NewServer creates a server on network at provided address
-func NewServer(network, address string) *Server {
+func NewServer(network, address, name string) *Server {
 	if GetManager().IsChild() {
-		log.Info("Restarting new server: %s:%s on PID: %d", network, address, os.Getpid())
+		log.Info("Restarting new %s server: %s:%s on PID: %d", name, network, address, os.Getpid())
 	} else {
-		log.Info("Starting new server: %s:%s on PID: %d", network, address, os.Getpid())
+		log.Info("Starting new %s server: %s:%s on PID: %d", name, network, address, os.Getpid())
 	}
 	srv := &Server{
-		wg:      sync.WaitGroup{},
-		state:   stateInit,
-		lock:    &sync.RWMutex{},
-		network: network,
-		address: address,
+		state:                stateInit,
+		network:              network,
+		address:              address,
+		PerWriteTimeout:      setting.PerWriteTimeout,
+		PerWritePerKbTimeout: setting.PerWritePerKbTimeout,
 	}
+	srv.connEmptyCond = sync.NewCond(&srv.lock)
 
 	srv.BeforeBegin = func(network, addr string) {
 		log.Debug("Starting server on %s:%s (PID: %d)", network, addr, syscall.Getpid())
@@ -71,72 +70,69 @@ func NewServer(network, address string) *Server {
 
 // ListenAndServe listens on the provided network address and then calls Serve
 // to handle requests on incoming connections.
-func (srv *Server) ListenAndServe(serve ServeFunction) error {
+func (srv *Server) ListenAndServe(serve ServeFunction, useProxyProtocol bool) error {
 	go srv.awaitShutdown()
 
-	l, err := GetListener(srv.network, srv.address)
+	listener, err := GetListener(srv.network, srv.address)
 	if err != nil {
 		log.Error("Unable to GetListener: %v", err)
 		return err
 	}
 
-	srv.listener = newWrappedListener(l, srv)
+	// we need to wrap the listener to take account of our lifecycle
+	listener = newWrappedListener(listener, srv)
+
+	// Now we need to take account of ProxyProtocol settings...
+	if useProxyProtocol {
+		listener = &proxyprotocol.Listener{
+			Listener:           listener,
+			ProxyHeaderTimeout: setting.ProxyProtocolHeaderTimeout,
+			AcceptUnknown:      setting.ProxyProtocolAcceptUnknown,
+		}
+	}
+	srv.listener = listener
 
 	srv.BeforeBegin(srv.network, srv.address)
 
 	return srv.Serve(serve)
 }
 
-// ListenAndServeTLS listens on the provided network address and then calls
-// Serve to handle requests on incoming TLS connections.
-//
-// Filenames containing a certificate and matching private key for the server must
-// be provided. If the certificate is signed by a certificate authority, the
-// certFile should be the concatenation of the server's certificate followed by the
-// CA's certificate.
-func (srv *Server) ListenAndServeTLS(certFile, keyFile string, serve ServeFunction) error {
-	config := &tls.Config{}
-	if config.NextProtos == nil {
-		config.NextProtos = []string{"http/1.1"}
-	}
-
-	config.Certificates = make([]tls.Certificate, 1)
-
-	certPEMBlock, err := ioutil.ReadFile(certFile)
-	if err != nil {
-		log.Error("Failed to load https cert file %s for %s:%s: %v", certFile, srv.network, srv.address, err)
-		return err
-	}
-
-	keyPEMBlock, err := ioutil.ReadFile(keyFile)
-	if err != nil {
-		log.Error("Failed to load https key file %s for %s:%s: %v", keyFile, srv.network, srv.address, err)
-		return err
-	}
-
-	config.Certificates[0], err = tls.X509KeyPair(certPEMBlock, keyPEMBlock)
-	if err != nil {
-		log.Error("Failed to create certificate from cert file %s and key file %s for %s:%s: %v", certFile, keyFile, srv.network, srv.address, err)
-		return err
-	}
-
-	return srv.ListenAndServeTLSConfig(config, serve)
-}
-
 // ListenAndServeTLSConfig listens on the provided network address and then calls
 // Serve to handle requests on incoming TLS connections.
-func (srv *Server) ListenAndServeTLSConfig(tlsConfig *tls.Config, serve ServeFunction) error {
+func (srv *Server) ListenAndServeTLSConfig(tlsConfig *tls.Config, serve ServeFunction, useProxyProtocol, proxyProtocolTLSBridging bool) error {
 	go srv.awaitShutdown()
 
-	l, err := GetListener(srv.network, srv.address)
+	listener, err := GetListener(srv.network, srv.address)
 	if err != nil {
 		log.Error("Unable to get Listener: %v", err)
 		return err
 	}
 
-	wl := newWrappedListener(l, srv)
-	srv.listener = tls.NewListener(wl, tlsConfig)
+	// we need to wrap the listener to take account of our lifecycle
+	listener = newWrappedListener(listener, srv)
 
+	// Now we need to take account of ProxyProtocol settings... If we're not bridging then we expect that the proxy will forward the connection to us
+	if useProxyProtocol && !proxyProtocolTLSBridging {
+		listener = &proxyprotocol.Listener{
+			Listener:           listener,
+			ProxyHeaderTimeout: setting.ProxyProtocolHeaderTimeout,
+			AcceptUnknown:      setting.ProxyProtocolAcceptUnknown,
+		}
+	}
+
+	// Now handle the tls protocol
+	listener = tls.NewListener(listener, tlsConfig)
+
+	// Now if we're bridging then we need the proxy to tell us who we're bridging for...
+	if useProxyProtocol && proxyProtocolTLSBridging {
+		listener = &proxyprotocol.Listener{
+			Listener:           listener,
+			ProxyHeaderTimeout: setting.ProxyProtocolHeaderTimeout,
+			AcceptUnknown:      setting.ProxyProtocolAcceptUnknown,
+		}
+	}
+
+	srv.listener = listener
 	srv.BeforeBegin(srv.network, srv.address)
 
 	return srv.Serve(serve)
@@ -156,11 +152,11 @@ func (srv *Server) Serve(serve ServeFunction) error {
 	GetManager().RegisterServer()
 	err := serve(srv.listener)
 	log.Debug("Waiting for connections to finish... (PID: %d)", syscall.Getpid())
-	srv.wg.Wait()
+	srv.waitForActiveConnections()
 	srv.setState(stateTerminate)
 	GetManager().ServerDone()
 	// use of closed means that the listeners are closed - i.e. we should be shutting down - return nil
-	if err != nil && strings.Contains(err.Error(), "use of closed") {
+	if err == nil || strings.Contains(err.Error(), "use of closed") || strings.Contains(err.Error(), "http: Server closed") {
 		return nil
 	}
 	return err
@@ -180,15 +176,61 @@ func (srv *Server) setState(st state) {
 	srv.state = st
 }
 
+func (srv *Server) waitForActiveConnections() {
+	srv.lock.Lock()
+	for srv.connCounter > 0 {
+		srv.connEmptyCond.Wait()
+	}
+	srv.lock.Unlock()
+}
+
+func (srv *Server) wrapConnection(c net.Conn) (net.Conn, error) {
+	srv.lock.Lock()
+	defer srv.lock.Unlock()
+
+	if srv.state != stateRunning {
+		_ = c.Close()
+		return nil, syscall.EINVAL // same as AcceptTCP
+	}
+
+	srv.connCounter++
+	return &wrappedConn{Conn: c, server: srv}, nil
+}
+
+func (srv *Server) removeConnection(_ *wrappedConn) {
+	srv.lock.Lock()
+	defer srv.lock.Unlock()
+
+	srv.connCounter--
+	if srv.connCounter <= 0 {
+		srv.connEmptyCond.Broadcast()
+	}
+}
+
+// closeAllConnections forcefully closes all active connections
+func (srv *Server) closeAllConnections() {
+	srv.lock.Lock()
+	if srv.connCounter > 0 {
+		log.Warn("After graceful shutdown period, %d connections are still active. Forcefully close.", srv.connCounter)
+		srv.connCounter = 0 // OS will close all the connections after the process exits, so we just assume there is no active connection now
+	}
+	srv.lock.Unlock()
+	srv.connEmptyCond.Broadcast()
+}
+
 type filer interface {
 	File() (*os.File, error)
 }
 
 type wrappedListener struct {
 	net.Listener
-	stopped bool
-	server  *Server
+	server *Server
 }
+
+var (
+	_ net.Listener = (*wrappedListener)(nil)
+	_ filer        = (*wrappedListener)(nil)
+)
 
 func newWrappedListener(l net.Listener, srv *Server) *wrappedListener {
 	return &wrappedListener{
@@ -197,71 +239,56 @@ func newWrappedListener(l net.Listener, srv *Server) *wrappedListener {
 	}
 }
 
-func (wl *wrappedListener) Accept() (net.Conn, error) {
-	var c net.Conn
-	// Set keepalive on TCPListeners connections.
+func (wl *wrappedListener) Accept() (c net.Conn, err error) {
 	if tcl, ok := wl.Listener.(*net.TCPListener); ok {
+		// Set keepalive on TCPListeners connections if possible, see http.tcpKeepAliveListener
 		tc, err := tcl.AcceptTCP()
 		if err != nil {
 			return nil, err
 		}
-		_ = tc.SetKeepAlive(true)                  // see http.tcpKeepAliveListener
-		_ = tc.SetKeepAlivePeriod(3 * time.Minute) // see http.tcpKeepAliveListener
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(3 * time.Minute)
 		c = tc
 	} else {
-		var err error
 		c, err = wl.Listener.Accept()
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	closed := int32(0)
-
-	c = wrappedConn{
-		Conn:   c,
-		server: wl.server,
-		closed: &closed,
-	}
-
-	wl.server.wg.Add(1)
-	return c, nil
-}
-
-func (wl *wrappedListener) Close() error {
-	if wl.stopped {
-		return syscall.EINVAL
-	}
-
-	wl.stopped = true
-	return wl.Listener.Close()
+	return wl.server.wrapConnection(c)
 }
 
 func (wl *wrappedListener) File() (*os.File, error) {
 	// returns a dup(2) - FD_CLOEXEC flag *not* set so the listening socket can be passed to child processes
-	return wl.Listener.(filer).File()
+	lf, ok := wl.Listener.(filer)
+	if !ok {
+		return nil, fmt.Errorf("listener %T does not provide a File", wl.Listener)
+	}
+	return lf.File()
 }
 
 type wrappedConn struct {
 	net.Conn
-	server *Server
-	closed *int32
+	server   *Server
+	deadline time.Time
 }
 
-func (w wrappedConn) Close() error {
-	if atomic.CompareAndSwapInt32(w.closed, 0, 1) {
-		defer func() {
-			if err := recover(); err != nil {
-				select {
-				case <-GetManager().IsHammer():
-					// Likely deadlocked request released at hammertime
-					log.Warn("Panic during connection close! %v. Likely there has been a deadlocked request which has been released by forced shutdown.", err)
-				default:
-					log.Error("Panic during connection close! %v", err)
-				}
-			}
-		}()
-		w.server.wg.Done()
+func (w *wrappedConn) Write(p []byte) (n int, err error) {
+	if w.server.PerWriteTimeout > 0 {
+		minTimeout := time.Duration(len(p)/1024) * w.server.PerWritePerKbTimeout
+		minDeadline := time.Now().Add(minTimeout).Add(w.server.PerWriteTimeout)
+
+		w.deadline = w.deadline.Add(minTimeout)
+		if minDeadline.After(w.deadline) {
+			w.deadline = minDeadline
+		}
+		_ = w.Conn.SetWriteDeadline(w.deadline)
 	}
+	return w.Conn.Write(p)
+}
+
+func (w *wrappedConn) Close() error {
+	w.server.removeConnection(w)
 	return w.Conn.Close()
 }

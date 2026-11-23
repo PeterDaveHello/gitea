@@ -1,24 +1,36 @@
-// Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// Copyright 2024 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
 
 package generate
 
 import (
-	"os"
+	"encoding/base64"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
-func TestMain(m *testing.M) {
-	retVal := m.Run()
+func TestDecodeJwtSecretBase64(t *testing.T) {
+	_, err := DecodeJwtSecretBase64("abcd")
+	assert.ErrorContains(t, err, "invalid base64 decoded length")
+	_, err = DecodeJwtSecretBase64(strings.Repeat("a", 64))
+	assert.ErrorContains(t, err, "invalid base64 decoded length")
 
-	os.Exit(retVal)
+	str32 := strings.Repeat("x", 32)
+	encoded32 := base64.RawURLEncoding.EncodeToString([]byte(str32))
+	decoded32, err := DecodeJwtSecretBase64(encoded32)
+	assert.NoError(t, err)
+	assert.Equal(t, str32, string(decoded32))
 }
 
-func TestGetRandomString(t *testing.T) {
-	randomString, err := GetRandomString(4)
+func TestNewJwtSecretWithBase64(t *testing.T) {
+	secret, encoded := NewJwtSecretWithBase64()
+	assert.Len(t, secret, 32)
+	decoded, err := DecodeJwtSecretBase64(encoded)
 	assert.NoError(t, err)
-	assert.Len(t, randomString, 4)
+	assert.Equal(t, secret, decoded)
+
+	secret2, _ := NewJwtSecretWithBase64()
+	assert.NotEqual(t, secret, secret2)
 }

@@ -1,13 +1,13 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package references
 
 import (
+	"regexp"
 	"testing"
 
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/modules/setting"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -26,27 +26,47 @@ type testResult struct {
 	Action         XRefAction
 	RefLocation    *RefSpan
 	ActionLocation *RefSpan
+	TimeLog        string
+}
+
+func TestConvertFullHTMLReferencesToShortRefs(t *testing.T) {
+	re := regexp.MustCompile(`(\s|^|\(|\[)` +
+		regexp.QuoteMeta("https://ourgitea.com/git/") +
+		`([0-9a-zA-Z-_\.]+/[0-9a-zA-Z-_\.]+)/` +
+		`((?:issues)|(?:pulls))/([0-9]+)(?:\s|$|\)|\]|[:;,.?!]\s|[:;,.?!]$)`)
+	test := `this is a https://ourgitea.com/git/owner/repo/issues/123456789, foo
+https://ourgitea.com/git/owner/repo/pulls/123456789
+  And https://ourgitea.com/git/owner/repo/pulls/123
+`
+	expect := `this is a owner/repo#123456789, foo
+owner/repo!123456789
+  And owner/repo!123
+`
+
+	contentBytes := []byte(test)
+	convertFullHTMLReferencesToShortRefs(re, &contentBytes)
+	result := string(contentBytes)
+	assert.Equal(t, expect, result)
 }
 
 func TestFindAllIssueReferences(t *testing.T) {
-
 	fixtures := []testFixture{
 		{
 			"Simply closes: #29 yes",
 			[]testResult{
-				{29, "", "", "29", false, XRefActionCloses, &RefSpan{Start: 15, End: 18}, &RefSpan{Start: 7, End: 13}},
+				{29, "", "", "29", false, XRefActionCloses, &RefSpan{Start: 15, End: 18}, &RefSpan{Start: 7, End: 13}, ""},
 			},
 		},
 		{
 			"Simply closes: !29 yes",
 			[]testResult{
-				{29, "", "", "29", true, XRefActionCloses, &RefSpan{Start: 15, End: 18}, &RefSpan{Start: 7, End: 13}},
+				{29, "", "", "29", true, XRefActionCloses, &RefSpan{Start: 15, End: 18}, &RefSpan{Start: 7, End: 13}, ""},
 			},
 		},
 		{
 			" #124 yes, this is a reference.",
 			[]testResult{
-				{124, "", "", "124", false, XRefActionNone, &RefSpan{Start: 0, End: 4}, nil},
+				{124, "", "", "124", false, XRefActionNone, &RefSpan{Start: 0, End: 4}, nil, ""},
 			},
 		},
 		{
@@ -58,15 +78,24 @@ func TestFindAllIssueReferences(t *testing.T) {
 			[]testResult{},
 		},
 		{
-			"This user3/repo4#200 yes.",
+			"This org3/repo4#200 yes.",
 			[]testResult{
-				{200, "user3", "repo4", "200", false, XRefActionNone, &RefSpan{Start: 5, End: 20}, nil},
+				{200, "org3", "repo4", "200", false, XRefActionNone, &RefSpan{Start: 5, End: 19}, nil, ""},
 			},
 		},
 		{
-			"This user3/repo4!200 yes.",
+			"This org3/repo4!200 yes.",
 			[]testResult{
-				{200, "user3", "repo4", "200", true, XRefActionNone, &RefSpan{Start: 5, End: 20}, nil},
+				{200, "org3", "repo4", "200", true, XRefActionNone, &RefSpan{Start: 5, End: 19}, nil, ""},
+			},
+		},
+		{
+			"Closes #3，see（#4）and org3/repo4#200。修复#5 #6修",
+			[]testResult{
+				{3, "", "", "3", false, XRefActionCloses, &RefSpan{Start: 7, End: 9}, &RefSpan{Start: 0, End: 6}, ""},
+				{4, "", "", "4", false, XRefActionNone, &RefSpan{Start: 18, End: 20}, nil, ""},
+				{5, "", "", "5", false, XRefActionNone, &RefSpan{Start: 50, End: 52}, nil, ""},
+				{200, "org3", "repo4", "200", false, XRefActionNone, &RefSpan{Start: 27, End: 41}, nil, ""},
 			},
 		},
 		{
@@ -76,23 +105,23 @@ func TestFindAllIssueReferences(t *testing.T) {
 		{
 			"This [two](/user2/repo1/issues/921) yes.",
 			[]testResult{
-				{921, "user2", "repo1", "921", false, XRefActionNone, nil, nil},
+				{921, "user2", "repo1", "921", false, XRefActionNone, nil, nil, ""},
 			},
 		},
 		{
 			"This [three](/user2/repo1/pulls/922) yes.",
 			[]testResult{
-				{922, "user2", "repo1", "922", true, XRefActionNone, nil, nil},
+				{922, "user2", "repo1", "922", true, XRefActionNone, nil, nil, ""},
 			},
 		},
 		{
-			"This [four](http://gitea.com:3000/user3/repo4/issues/203) yes.",
+			"This [four](http://gitea.com:3000/org3/repo4/issues/203) yes.",
 			[]testResult{
-				{203, "user3", "repo4", "203", false, XRefActionNone, nil, nil},
+				{203, "org3", "repo4", "203", false, XRefActionNone, nil, nil, ""},
 			},
 		},
 		{
-			"This [five](http://github.com/user3/repo4/issues/204) no.",
+			"This [five](http://github.com/org3/repo4/issues/204) no.",
 			[]testResult{},
 		},
 		{
@@ -102,49 +131,63 @@ func TestFindAllIssueReferences(t *testing.T) {
 		{
 			"This http://gitea.com:3000/user4/repo5/pulls/202 yes.",
 			[]testResult{
-				{202, "user4", "repo5", "202", true, XRefActionNone, nil, nil},
+				{202, "user4", "repo5", "202", true, XRefActionNone, nil, nil, ""},
+			},
+		},
+		{
+			"This http://gitea.com:3000/user4/repo5/pulls/202 yes. http://gitea.com:3000/user4/repo5/pulls/203 no",
+			[]testResult{
+				{202, "user4", "repo5", "202", true, XRefActionNone, nil, nil, ""},
+				{203, "user4", "repo5", "203", true, XRefActionNone, nil, nil, ""},
 			},
 		},
 		{
 			"This http://GiTeA.COM:3000/user4/repo6/pulls/205 yes.",
 			[]testResult{
-				{205, "user4", "repo6", "205", true, XRefActionNone, nil, nil},
+				{205, "user4", "repo6", "205", true, XRefActionNone, nil, nil, ""},
 			},
 		},
 		{
 			"Reopens #15 yes",
 			[]testResult{
-				{15, "", "", "15", false, XRefActionReopens, &RefSpan{Start: 8, End: 11}, &RefSpan{Start: 0, End: 7}},
+				{15, "", "", "15", false, XRefActionReopens, &RefSpan{Start: 8, End: 11}, &RefSpan{Start: 0, End: 7}, ""},
 			},
 		},
 		{
 			"This closes #20 for you yes",
 			[]testResult{
-				{20, "", "", "20", false, XRefActionCloses, &RefSpan{Start: 12, End: 15}, &RefSpan{Start: 5, End: 11}},
+				{20, "", "", "20", false, XRefActionCloses, &RefSpan{Start: 12, End: 15}, &RefSpan{Start: 5, End: 11}, ""},
 			},
 		},
 		{
-			"Do you fix user6/repo6#300 ? yes",
+			"Do you fix org6/repo6#300 ? yes",
 			[]testResult{
-				{300, "user6", "repo6", "300", false, XRefActionCloses, &RefSpan{Start: 11, End: 26}, &RefSpan{Start: 7, End: 10}},
+				{300, "org6", "repo6", "300", false, XRefActionCloses, &RefSpan{Start: 11, End: 25}, &RefSpan{Start: 7, End: 10}, ""},
 			},
 		},
 		{
 			"For 999 #1235 no keyword, but yes",
 			[]testResult{
-				{1235, "", "", "1235", false, XRefActionNone, &RefSpan{Start: 8, End: 13}, nil},
+				{1235, "", "", "1235", false, XRefActionNone, &RefSpan{Start: 8, End: 13}, nil, ""},
+			},
+		},
+		{
+			"After a long investigation into the root cause, this resolves #1, unlike the still unresolved #2",
+			[]testResult{
+				{1, "", "", "1", false, XRefActionCloses, &RefSpan{Start: 62, End: 64}, &RefSpan{Start: 53, End: 61}, ""},
+				{2, "", "", "2", false, XRefActionNone, &RefSpan{Start: 94, End: 96}, nil, ""},
 			},
 		},
 		{
 			"For [!123] yes",
 			[]testResult{
-				{123, "", "", "123", true, XRefActionNone, &RefSpan{Start: 5, End: 9}, nil},
+				{123, "", "", "123", true, XRefActionNone, &RefSpan{Start: 5, End: 9}, nil, ""},
 			},
 		},
 		{
 			"For (#345) yes",
 			[]testResult{
-				{345, "", "", "345", false, XRefActionNone, &RefSpan{Start: 5, End: 9}, nil},
+				{345, "", "", "345", false, XRefActionNone, &RefSpan{Start: 5, End: 9}, nil, ""},
 			},
 		},
 		{
@@ -154,36 +197,107 @@ func TestFindAllIssueReferences(t *testing.T) {
 		{
 			"For #24, and #25. yes; also #26; #27? #28! and #29: should",
 			[]testResult{
-				{24, "", "", "24", false, XRefActionNone, &RefSpan{Start: 4, End: 7}, nil},
-				{25, "", "", "25", false, XRefActionNone, &RefSpan{Start: 13, End: 16}, nil},
-				{26, "", "", "26", false, XRefActionNone, &RefSpan{Start: 28, End: 31}, nil},
-				{27, "", "", "27", false, XRefActionNone, &RefSpan{Start: 33, End: 36}, nil},
-				{28, "", "", "28", false, XRefActionNone, &RefSpan{Start: 38, End: 41}, nil},
-				{29, "", "", "29", false, XRefActionNone, &RefSpan{Start: 47, End: 50}, nil},
+				{24, "", "", "24", false, XRefActionNone, &RefSpan{Start: 4, End: 7}, nil, ""},
+				{25, "", "", "25", false, XRefActionNone, &RefSpan{Start: 13, End: 16}, nil, ""},
+				{26, "", "", "26", false, XRefActionNone, &RefSpan{Start: 28, End: 31}, nil, ""},
+				{27, "", "", "27", false, XRefActionNone, &RefSpan{Start: 33, End: 36}, nil, ""},
+				{28, "", "", "28", false, XRefActionNone, &RefSpan{Start: 38, End: 41}, nil, ""},
+				{29, "", "", "29", false, XRefActionNone, &RefSpan{Start: 47, End: 50}, nil, ""},
 			},
 		},
 		{
-			"This user3/repo4#200, yes.",
+			"This org3/repo4#200, yes.",
 			[]testResult{
-				{200, "user3", "repo4", "200", false, XRefActionNone, &RefSpan{Start: 5, End: 20}, nil},
+				{200, "org3", "repo4", "200", false, XRefActionNone, &RefSpan{Start: 5, End: 19}, nil, ""},
+			},
+		},
+		{
+			"Merge pull request '#12345 My fix for a bug' (!1337) from feature-branch into main",
+			[]testResult{
+				{12345, "", "", "12345", false, XRefActionNone, &RefSpan{Start: 20, End: 26}, nil, ""},
+				{1337, "", "", "1337", true, XRefActionNone, &RefSpan{Start: 46, End: 51}, nil, ""},
 			},
 		},
 		{
 			"Which abc. #9434 same as above",
 			[]testResult{
-				{9434, "", "", "9434", false, XRefActionNone, &RefSpan{Start: 11, End: 16}, nil},
+				{9434, "", "", "9434", false, XRefActionNone, &RefSpan{Start: 11, End: 16}, nil, ""},
 			},
 		},
 		{
 			"This closes #600 and reopens #599",
 			[]testResult{
-				{600, "", "", "600", false, XRefActionCloses, &RefSpan{Start: 12, End: 16}, &RefSpan{Start: 5, End: 11}},
-				{599, "", "", "599", false, XRefActionReopens, &RefSpan{Start: 29, End: 33}, &RefSpan{Start: 21, End: 28}},
+				{600, "", "", "600", false, XRefActionCloses, &RefSpan{Start: 12, End: 16}, &RefSpan{Start: 5, End: 11}, ""},
+				{599, "", "", "599", false, XRefActionReopens, &RefSpan{Start: 29, End: 33}, &RefSpan{Start: 21, End: 28}, ""},
+			},
+		},
+		{
+			"This fixes #100 spent @40m and reopens #101, also fixes #102 spent @4h15m",
+			[]testResult{
+				{100, "", "", "100", false, XRefActionCloses, &RefSpan{Start: 11, End: 15}, &RefSpan{Start: 5, End: 10}, "40m"},
+				{101, "", "", "101", false, XRefActionReopens, &RefSpan{Start: 39, End: 43}, &RefSpan{Start: 31, End: 38}, ""},
+				{102, "", "", "102", false, XRefActionCloses, &RefSpan{Start: 56, End: 60}, &RefSpan{Start: 50, End: 55}, "4h15m"},
 			},
 		},
 	}
 
 	testFixtures(t, fixtures, "default")
+
+	// Test closing/reopening keywords with URLs (issue #27549)
+	// Uses the same AppURL as testFixtures (https://gitea.com:3000/)
+	urlFixtures := []testFixture{
+		{
+			"Closes [this issue](https://gitea.com:3000/user/repo/issues/123)",
+			[]testResult{
+				{123, "user", "repo", "123", false, XRefActionCloses, nil, &RefSpan{Start: 0, End: 6}, ""},
+			},
+		},
+		{
+			"This fixes [#456](https://gitea.com:3000/org/project/issues/456)",
+			[]testResult{
+				{456, "org", "project", "456", false, XRefActionCloses, nil, &RefSpan{Start: 5, End: 10}, ""},
+			},
+		},
+		{
+			"Reopens [PR](https://gitea.com:3000/owner/repo/pulls/789)",
+			[]testResult{
+				{789, "owner", "repo", "789", true, XRefActionReopens, nil, &RefSpan{Start: 0, End: 7}, ""},
+			},
+		},
+		{
+			"See [issue](https://gitea.com:3000/user/repo/issues/100) but closes [another](https://gitea.com:3000/user/repo/issues/200)",
+			[]testResult{
+				{100, "user", "repo", "100", false, XRefActionNone, nil, nil, ""},
+				{200, "user", "repo", "200", false, XRefActionCloses, nil, &RefSpan{Start: 61, End: 67}, ""},
+			},
+		},
+	}
+
+	testFixtures(t, urlFixtures, "url-keywords")
+
+	// Test bare URLs (not markdown links) with closing keywords
+	// These use FindAllIssueReferences (non-markdown) which converts full URLs to short refs first
+	setting.AppURL = "https://gitea.com:3000/"
+	bareURLTests := []struct {
+		name     string
+		input    string
+		expected XRefAction
+	}{
+		{"Fixes bare URL", "Fixes https://gitea.com:3000/org/project/issues/456", XRefActionCloses},
+		{"Fixes with colon", "Fixes: https://gitea.com:3000/org/project/issues/456", XRefActionCloses},
+		{"Closes bare URL", "Closes https://gitea.com:3000/user/repo/issues/123", XRefActionCloses},
+		{"Closes with colon", "Closes: https://gitea.com:3000/user/repo/issues/123", XRefActionCloses},
+	}
+
+	for _, tt := range bareURLTests {
+		t.Run(tt.name, func(t *testing.T) {
+			refs := FindAllIssueReferences(tt.input)
+			assert.Len(t, refs, 1, "Expected 1 reference for: %s", tt.input)
+			if len(refs) > 0 {
+				assert.Equal(t, tt.expected, refs[0].Action, "Expected action %v for: %s", tt.expected, tt.input)
+			}
+		})
+	}
 
 	type alnumFixture struct {
 		input          string
@@ -207,11 +321,10 @@ func TestFindAllIssueReferences(t *testing.T) {
 	}
 
 	for _, fixture := range alnumFixtures {
-		found, ref := FindRenderizableReferenceAlphanumeric(fixture.input)
+		ref := FindRenderizableReferenceAlphanumeric(fixture.input)
 		if fixture.issue == "" {
-			assert.False(t, found, "Failed to parse: {%s}", fixture.input)
+			assert.Nil(t, ref, "Failed to parse: {%s}", fixture.input)
 		} else {
-			assert.True(t, found, "Failed to parse: {%s}", fixture.input)
 			assert.Equal(t, fixture.issue, ref.Issue, "Failed to parse: {%s}", fixture.input)
 			assert.Equal(t, fixture.refLocation, ref.RefLocation, "Failed to parse: {%s}", fixture.input)
 			assert.Equal(t, fixture.action, ref.Action, "Failed to parse: {%s}", fixture.input)
@@ -237,13 +350,14 @@ func testFixtures(t *testing.T, fixtures []testFixture, context string) {
 				issue:          e.Issue,
 				refLocation:    e.RefLocation,
 				actionLocation: e.ActionLocation,
+				timeLog:        e.TimeLog,
 			}
 		}
 		expref := rawToIssueReferenceList(expraw)
 		refs := FindAllIssueReferencesMarkdown(fixture.input)
-		assert.EqualValues(t, expref, refs, "[%s] Failed to parse: {%s}", context, fixture.input)
+		assert.Equal(t, expref, refs, "[%s] Failed to parse: {%s}", context, fixture.input)
 		rawrefs := findAllIssueReferencesMarkdown(fixture.input)
-		assert.EqualValues(t, expraw, rawrefs, "[%s] Failed to parse: {%s}", context, fixture.input)
+		assert.Equal(t, expraw, rawrefs, "[%s] Failed to parse: {%s}", context, fixture.input)
 	}
 
 	// Restore for other tests that may rely on the original value
@@ -252,7 +366,7 @@ func testFixtures(t *testing.T, fixtures []testFixture, context string) {
 
 func TestFindAllMentions(t *testing.T) {
 	res := FindAllMentionsBytes([]byte("@tasha, @mike; @lucy: @john"))
-	assert.EqualValues(t, []RefSpan{
+	assert.Equal(t, []RefSpan{
 		{Start: 0, End: 6},
 		{Start: 8, End: 13},
 		{Start: 15, End: 20},
@@ -260,12 +374,73 @@ func TestFindAllMentions(t *testing.T) {
 	}, res)
 }
 
+func TestFindRenderizableCommitCrossReference(t *testing.T) {
+	cases := []struct {
+		Input    string
+		Expected *RenderizableReference
+	}{
+		{
+			Input:    "",
+			Expected: nil,
+		},
+		{
+			Input:    "test",
+			Expected: nil,
+		},
+		{
+			Input:    "go-gitea/gitea@test",
+			Expected: nil,
+		},
+		{
+			Input:    "go-gitea/gitea@ab1234",
+			Expected: nil,
+		},
+		{
+			Input: "go-gitea/gitea@abcd1234",
+			Expected: &RenderizableReference{
+				Owner:       "go-gitea",
+				Name:        "gitea",
+				CommitSha:   "abcd1234",
+				RefLocation: &RefSpan{Start: 0, End: 23},
+			},
+		},
+		{
+			Input: "go-gitea/gitea@abcd1234abcd1234abcd1234abcd1234abcd1234",
+			Expected: &RenderizableReference{
+				Owner:       "go-gitea",
+				Name:        "gitea",
+				CommitSha:   "abcd1234abcd1234abcd1234abcd1234abcd1234",
+				RefLocation: &RefSpan{Start: 0, End: 55},
+			},
+		},
+		{
+			Input:    "go-gitea/gitea@abcd1234abcd1234abcd1234abcd1234abcd12341234512345123451234512345", // longer than 64 characters
+			Expected: nil,
+		},
+		{
+			Input: "test go-gitea/gitea@abcd1234 test",
+			Expected: &RenderizableReference{
+				Owner:       "go-gitea",
+				Name:        "gitea",
+				CommitSha:   "abcd1234",
+				RefLocation: &RefSpan{Start: 5, End: 28},
+			},
+		},
+	}
+
+	for _, c := range cases {
+		found, ref := FindRenderizableCommitCrossReference(c.Input)
+		assert.Equal(t, ref != nil, found)
+		assert.Equal(t, c.Expected, ref)
+	}
+}
+
 func TestRegExp_mentionPattern(t *testing.T) {
 	trueTestCases := []struct {
 		pat string
 		exp string
 	}{
-		{"@Unknwon", "@Unknwon"},
+		{"@User", "@User"},
 		{"@ANT_123", "@ANT_123"},
 		{"@xxx-DiN0-z-A..uru..s-xxx", "@xxx-DiN0-z-A..uru..s-xxx"},
 		{"   @lol   ", "@lol"},
@@ -287,6 +462,8 @@ func TestRegExp_mentionPattern(t *testing.T) {
 		{"@gitea.", "@gitea"},
 		{"@gitea,", "@gitea"},
 		{"@gitea;", "@gitea"},
+		{"@gitea/team1;", "@gitea/team1"},
+		{"@user's idea", "@user"},
 	}
 	falseTestCases := []string{
 		"@ 0",
@@ -302,15 +479,15 @@ func TestRegExp_mentionPattern(t *testing.T) {
 		"@gitea?this",
 		"@gitea,this",
 		"@gitea;this",
+		"@gitea/team1/more",
 	}
 
 	for _, testCase := range trueTestCases {
-		found := mentionPattern.FindStringSubmatch(testCase.pat)
-		assert.Len(t, found, 2)
+		found := globalVars().mentionPattern.FindStringSubmatch(testCase.pat)
 		assert.Equal(t, testCase.exp, found[1])
 	}
 	for _, testCase := range falseTestCases {
-		res := mentionPattern.MatchString(testCase)
+		res := globalVars().mentionPattern.MatchString(testCase)
 		assert.False(t, res, "[%s] should be false", testCase)
 	}
 }
@@ -323,6 +500,8 @@ func TestRegExp_issueNumericPattern(t *testing.T) {
 		"  #12",
 		"#12:",
 		"ref: #12: msg",
+		"\"#1234\"",
+		"'#1234'",
 	}
 	falseTestCases := []string{
 		"# 1234",
@@ -336,10 +515,10 @@ func TestRegExp_issueNumericPattern(t *testing.T) {
 	}
 
 	for _, testCase := range trueTestCases {
-		assert.True(t, issueNumericPattern.MatchString(testCase))
+		assert.True(t, globalVars().issueNumericPattern.MatchString(testCase))
 	}
 	for _, testCase := range falseTestCases {
-		assert.False(t, issueNumericPattern.MatchString(testCase))
+		assert.False(t, globalVars().issueNumericPattern.MatchString(testCase))
 	}
 }
 
@@ -353,6 +532,9 @@ func TestRegExp_issueAlphanumericPattern(t *testing.T) {
 		"(ABC-123)",
 		"[ABC-123]",
 		"ABC-123:",
+		"\"ABC-123\"",
+		"'ABC-123'",
+		"ABC-123, unknown PR",
 	}
 	falseTestCases := []string{
 		"RC-08",
@@ -370,10 +552,10 @@ func TestRegExp_issueAlphanumericPattern(t *testing.T) {
 	}
 
 	for _, testCase := range trueTestCases {
-		assert.True(t, issueAlphanumericPattern.MatchString(testCase))
+		assert.True(t, globalVars().issueAlphanumericPattern.MatchString(testCase))
 	}
 	for _, testCase := range falseTestCases {
-		assert.False(t, issueAlphanumericPattern.MatchString(testCase))
+		assert.False(t, globalVars().issueAlphanumericPattern.MatchString(testCase))
 	}
 }
 
@@ -382,25 +564,25 @@ func TestCustomizeCloseKeywords(t *testing.T) {
 		{
 			"Simplemente cierra: #29 yes",
 			[]testResult{
-				{29, "", "", "29", false, XRefActionCloses, &RefSpan{Start: 20, End: 23}, &RefSpan{Start: 12, End: 18}},
+				{29, "", "", "29", false, XRefActionCloses, &RefSpan{Start: 20, End: 23}, &RefSpan{Start: 12, End: 18}, ""},
 			},
 		},
 		{
 			"Closes: #123 no, this English.",
 			[]testResult{
-				{123, "", "", "123", false, XRefActionNone, &RefSpan{Start: 8, End: 12}, nil},
+				{123, "", "", "123", false, XRefActionNone, &RefSpan{Start: 8, End: 12}, nil, ""},
 			},
 		},
 		{
-			"Cerró user6/repo6#300 yes",
+			"Cerró org6/repo6#300 yes",
 			[]testResult{
-				{300, "user6", "repo6", "300", false, XRefActionCloses, &RefSpan{Start: 7, End: 22}, &RefSpan{Start: 0, End: 6}},
+				{300, "org6", "repo6", "300", false, XRefActionCloses, &RefSpan{Start: 7, End: 21}, &RefSpan{Start: 0, End: 6}, ""},
 			},
 		},
 		{
-			"Reabre user3/repo4#200 yes",
+			"Reabre org3/repo4#200 yes",
 			[]testResult{
-				{200, "user3", "repo4", "200", false, XRefActionReopens, &RefSpan{Start: 7, End: 22}, &RefSpan{Start: 0, End: 6}},
+				{200, "org3", "repo4", "200", false, XRefActionReopens, &RefSpan{Start: 7, End: 21}, &RefSpan{Start: 0, End: 6}, ""},
 			},
 		},
 	}
@@ -416,7 +598,7 @@ func TestCustomizeCloseKeywords(t *testing.T) {
 
 func TestParseCloseKeywords(t *testing.T) {
 	// Test parsing of CloseKeywords and ReopenKeywords
-	assert.Len(t, parseKeywords([]string{""}), 0)
+	assert.Empty(t, parseKeywords([]string{""}))
 	assert.Len(t, parseKeywords([]string{"  aa  ", " bb  ", "99", "#", "", "this is", "cc"}), 3)
 
 	for _, test := range []struct {
@@ -434,7 +616,7 @@ func TestParseCloseKeywords(t *testing.T) {
 		{",$!", "", ""},
 		{"1234", "", ""},
 	} {
-		// The patern only needs to match the part that precedes the reference.
+		// The pattern only needs to match the part that precedes the reference.
 		// getCrossReference() takes care of finding the reference itself.
 		pat := makeKeywordsPat([]string{test.pattern})
 		if test.expected == "" {
@@ -444,7 +626,7 @@ func TestParseCloseKeywords(t *testing.T) {
 			res := pat.FindAllStringSubmatch(test.match, -1)
 			assert.Len(t, res, 1)
 			assert.Len(t, res[0], 2)
-			assert.EqualValues(t, test.expected, res[0][1])
+			assert.Equal(t, test.expected, res[0][1])
 		}
 	}
 }

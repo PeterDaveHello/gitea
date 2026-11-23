@@ -1,36 +1,45 @@
-<h4 class="ui top attached header">
-	<div class="ui stackable grid">
-		<div class="five wide column">
-			{{if or .PageIsCommits (gt .CommitCount 0)}}
-				{{.CommitCount}} {{.i18n.Tr "repo.commits.commits"}} {{if .Branch}}({{.Branch}}){{end}}
-			{{else}}
-				{{.i18n.Tr "repo.commits.no_commits" $.BaseBranch $.HeadBranch }} {{if .Branch}}({{.Branch}}){{end}}
-			{{end}}
-		</div>
-		<div class="eleven wide right aligned column">
-			{{if .PageIsCommits}}
-				<form class="ignore-dirty" action="{{.RepoLink}}/commits/{{.BranchNameSubURL | EscapePound}}/search">
-					<div class="ui tiny search input">
-						<input name="q" placeholder="{{.i18n.Tr "repo.commits.search"}}" value="{{.Keyword}}" autofocus>
-					</div>
-					&nbsp;
-					<div class="ui checkbox">
-						<input type="checkbox" name="all" id="all" value="true" {{.All}}>
-						<label for="all">{{.i18n.Tr "repo.commits.search_all"}} &nbsp;&nbsp;</label>
-					</div>
-					<button class="ui blue tiny button" data-panel="#add-deploy-key-panel" data-tooltip={{.i18n.Tr "repo.commits.search.tooltip"}}>{{.i18n.Tr "repo.commits.find"}}</button>
-				</form>
-			{{else if .IsDiffCompare}}
-				<a href="{{$.CommitRepoLink}}/commit/{{.BeforeCommitID}}" class="ui green sha label">{{if not .BaseIsCommit}}{{if .BaseIsBranch}}{{svg "octicon-git-branch" 16}}{{else if .BaseIsTag}}{{svg "octicon-tag" 16}}{{end}}{{.BaseBranch}}{{else}}{{ShortSha .BaseBranch}}{{end}}</a>
-				...
-				<a href="{{$.CommitRepoLink}}/commit/{{.AfterCommitID}}" class="ui green sha label">{{if not .HeadIsCommit}}{{if .HeadIsBranch}}{{svg "octicon-git-branch" 16}}{{else if .HeadIsTag}}{{svg "octicon-tag" 16}}{{end}}{{.HeadBranch}}{{else}}{{ShortSha .HeadBranch}}{{end}}</a>
-			{{end}}
-		</div>
+<div class="ui top attached header flex-left-right">
+	<div class="flex-text-block">
+		{{if or .Commits .IsDiffCompare}}
+			{{if ge .CommitCount 0}}{{.CommitCount}}{{end}}{{/* CommitCount is -1 when "follow rename" */}}
+			{{ctx.Locale.Tr "repo.commits.commits"}}
+		{{else if .IsNothingToCompare}}
+			{{ctx.Locale.Tr "repo.commits.nothing_to_compare"}}
+		{{else}}
+			{{ctx.Locale.Tr "repo.commits.no_commits" $.BaseBranch $.HeadBranch}}
+		{{end}}
 	</div>
-</h4>
+	<div class="flex-text-block">
+		{{if .ShowFollowRename}}
+		<div class="ui checkbox">
+			<input type="checkbox" {{if .FollowRenameChecked}}checked{{end}} data-global-init="initCommitHistoryFollowRename">
+			<label>{{ctx.Locale.Tr "repo.commits.history_enable_follow_renames"}}</label>
+		</div>
+		{{end}}
+		{{if .IsDiffCompare}}
+		<div class="flex-text-inline">
+			<a href="{{$.CommitRepoLink}}/commit/{{.BeforeCommitID | PathEscape}}" class="ui green sha label tw-mx-0">{{template "repo/commits_ref_name" .CompareInfo.BaseRef}}</a>
+			{{$.CompareInfo.CompareSeparator}}
+			<a href="{{$.CommitRepoLink}}/commit/{{.AfterCommitID | PathEscape}}" class="ui green sha label tw-mx-0">{{template "repo/commits_ref_name" .CompareInfo.HeadRef}}</a>
+		</div>
+		{{end}}
+	</div>
+</div>
 
-{{if and .Commits (gt .CommitCount 0)}}
-    {{template "repo/commits_list" .}}
+{{if .PageIsCommits}}
+	<div class="ui attached segment">
+		<form class="ignore-dirty" action="{{.RepoLink}}/commits/{{.RefTypeNameSubURL}}/search">
+			<div class="ui small fluid action input">
+				{{template "shared/search/input" dict "Value" .Keyword "Placeholder" (ctx.Locale.Tr "search.commit_kind")}}
+				{{template "repo/commits_search_dropdown" .}}
+				{{template "shared/search/button" dict "Tooltip" (ctx.Locale.Tr "repo.commits.search.tooltip")}}
+			</div>
+		</form>
+	</div>
+{{end}}
+
+{{if .Commits}}
+	{{template "repo/commits_list" .}}
 {{end}}
 
 {{template "base/paginate" .}}

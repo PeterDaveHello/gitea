@@ -1,83 +1,80 @@
-<div class="ui attached table segment">
-		<table class="ui very basic striped fixed table single line" id="commits-table">
-			<thead>
+<div class="ui attached table segment commit-table">
+	<table class="ui very basic table unstackable" id="commits-table">
+		<thead>
+			<tr>
+				<th class="three wide">{{ctx.Locale.Tr "repo.commits.author"}}</th>
+				<th class="two wide sha">{{StringUtils.ToUpper $.Repository.ObjectFormatName}}</th>
+				<th class="eight wide message">{{ctx.Locale.Tr "repo.commits.message"}}</th>
+				<th class="two wide tw-text-right">{{ctx.Locale.Tr "repo.commits.date"}}</th>
+				<th class="one wide"></th>
+			</tr>
+		</thead>
+		<tbody class="commit-list">
+			{{$commitRepoLink := $.RepoLink}}{{if $.CommitRepoLink}}{{$commitRepoLink = $.CommitRepoLink}}{{end}}
+			{{range $commit := $.Commits}}
+				{{$gitCommit := $commit.GitCommit}}
+				{{$commitID := $gitCommit.ID.String}}
 				<tr>
-					<th class="four wide">{{.i18n.Tr "repo.commits.author"}}</th>
-					<th class="two wide sha">SHA1</th>
-					<th class="seven wide message">{{.i18n.Tr "repo.commits.message"}}</th>
-					<th class="three wide right aligned">{{.i18n.Tr "repo.commits.date"}}</th>
-				</tr>
-			</thead>
-			<tbody class="commit-list">
-				{{ $r:= List .Commits}}
-				{{range $r}}
-					<tr>
-						<td class="author">
-							{{$userName := .Author.Name}}
-							{{if .User}}
-								{{if .User.FullName}}
-									{{$userName = .User.FullName}}
-								{{end}}
-								<img class="ui avatar image" src="{{.User.RelAvatarLink}}" alt=""/>&nbsp;&nbsp;<a href="{{AppSubUrl}}/{{.User.Name}}">{{$userName}}</a>
-							{{else}}
-								<img class="ui avatar image" src="{{AvatarLink .Author.Email}}" alt=""/>&nbsp;&nbsp;{{$userName}}
-							{{end}}
-						</td>
-						<td class="sha">
-							{{$class := "ui sha label"}}
-							{{if .Signature}}
-								{{$class = (printf "%s%s" $class " isSigned")}}
-								{{if .Verification.Verified}}
-									{{if eq .Verification.TrustStatus "trusted"}}
-										{{$class = (printf "%s%s" $class " isVerified")}}
-									{{else if eq .Verification.TrustStatus "untrusted"}}
-										{{$class = (printf "%s%s" $class " isVerifiedUntrusted")}}
-									{{else}}
-										{{$class = (printf "%s%s" $class " isVerifiedUnmatched")}}
-									{{end}}
-								{{else if .Verification.Warning}}
-									{{$class = (printf "%s%s" $class " isWarning")}}
-								{{end}}
-							{{end}}
-							{{if $.PageIsWiki}}
-								<a href="{{AppSubUrl}}/{{$.Username}}/{{$.Reponame}}/wiki/commit/{{.ID}}" rel="nofollow" class="{{$class}}">
-							{{else if $.Reponame}}
-								<a href="{{AppSubUrl}}/{{$.Username}}/{{$.Reponame}}/commit/{{.ID}}" rel="nofollow" class="{{$class}}">
-							{{else}}
-								<span class="{{$class}}">
-							{{end}}
-								<span class="shortsha">{{ShortSha .ID.String}}</span>
-								{{if .Signature}}
-									{{template "repo/shabox_badge" dict "root" $ "verification" .Verification}}
-								{{end}}
-							{{if $.Reponame}}
-								</a>
-							{{else}}
-								</span>
-							{{end}}
-						</td>
-						<td class="message">
-							<span class="message-wrapper">
-							{{if $.PageIsWiki}}
-								<span class="commit-summary {{if gt .ParentCount 1}} grey text{{end}}" title="{{.Summary}}">{{.Summary | RenderEmoji}}</span>
-							{{else }}
-								{{ $commitLink:= printf "%s/%s/%s/commit/%s" AppSubUrl $.Username $.Reponame .ID }}
-								<span class="commit-summary {{if gt .ParentCount 1}} grey text{{end}}" title="{{.Summary}}">{{RenderCommitMessageLinkSubject .Message $.RepoLink $commitLink $.Repository.ComposeMetas}}</span>
-							{{end}}
+					<td class="author">
+						{{ctx.RenderUtils.AvatarStackWithNames $commit.AvatarStackData}}
+					</td>
+					<td class="sha">
+						{{$commitBaseLink := ""}}
+						{{if $.PageIsWiki}}
+							{{$commitBaseLink = printf "%s/wiki/commit" $commitRepoLink}}
+						{{else if $.PageIsPullCommits}}
+							{{$commitBaseLink = printf "%s/pulls/%d/commits" $commitRepoLink $.Issue.Index}}
+						{{else}}
+							{{$commitBaseLink = printf "%s/commit" $commitRepoLink}}
+						{{end}}
+						{{template "repo/commit_sign_badge" dict "Commit" $gitCommit "CommitBaseLink" $commitBaseLink "CommitSignVerification" .Verification}}
+					</td>
+					<td class="message">
+						<span class="message-wrapper">
+						{{if $.PageIsWiki}}
+							<span class="commit-summary {{if gt $gitCommit.ParentCount 1}} grey text{{end}}" title="{{$gitCommit.MessageTitle}}">
+								{{$gitCommit.MessageTitle | ctx.RenderUtils.RenderEmoji}}
 							</span>
-							{{if IsMultilineCommitMessage .Message}}
-							<button class="basic compact mini ui icon button commit-button"><i class="ellipsis horizontal icon"></i></button>
+						{{else}}
+							{{$commitLink:= printf "%s/commit/%s" $commitRepoLink (PathEscape $commitID)}}
+							<span class="commit-summary {{if gt $gitCommit.ParentCount 1}} grey text{{end}}" title="{{$gitCommit.MessageTitle}}">
+								{{ctx.RenderUtils.RenderCommitMessageLinkSubject $gitCommit.MessageUTF8 $commitLink $.Repository}}
+							</span>
+						{{end}}
+						</span>
+						{{if $gitCommit.MessageBody}}
+						<button type="button" class="ui button ellipsis-button" aria-expanded="false" data-global-click="onRepoEllipsisButtonClick">...</button>
+						{{end}}
+						{{template "repo/commit_statuses" dict "Status" .Status "Statuses" .Statuses}}
+						{{if $gitCommit.MessageBody}}
+						<pre class="commit-body tw-hidden">{{ctx.RenderUtils.RenderCommitBody $gitCommit.MessageUTF8 $.Repository}}</pre>
+						{{end}}
+						{{if $.CommitsTagsMap}}
+							{{range (index $.CommitsTagsMap $commitID)}}
+								{{- template "repo/tag/name" dict "AdditionalClasses" "tw-py-0" "RepoLink" $.Repository.Link "TagName" .TagName "IsRelease" (not .IsTag) -}}
 							{{end}}
-							{{if eq (CommitType .) "SignCommitWithStatuses"}}
-								{{template "repo/commit_status" .Status}}
+						{{end}}
+					</td>
+					<td class="tw-text-right">{{DateUtils.TimeSince $gitCommit.Committer.When}}</td>
+					<td class="tw-text-right tw-py-0">
+						<button type="button" class="btn interact-bg tw-p-2 copy-commit-id" data-tooltip-content="{{ctx.Locale.Tr "copy_hash"}}" data-clipboard-text="{{$commitID}}">{{svg "octicon-copy"}}</button>
+						{{/* at the moment, wiki doesn't support these "view" links like "view at history point" */}}
+						{{if not $.PageIsWiki}}
+							{{/* view single file diff */}}
+							{{if $.FileTreePath}}
+							<a class="btn interact-bg tw-p-2 view-single-diff" data-tooltip-content="{{ctx.Locale.Tr "repo.commits.view_file_diff"}}"
+								href="{{$commitRepoLink}}/commit/{{$commitID}}?files={{$.FileTreePath}}"
+							>{{svg "octicon-file-diff"}}</a>
 							{{end}}
-							{{if IsMultilineCommitMessage .Message}}
-							<pre class="commit-body" style="display: none;">{{RenderCommitBody .Message $.RepoLink $.Repository.ComposeMetas}}</pre>
-							{{end}}
-						</td>
-						<td class="text right aligned">{{TimeSince .Author.When $.Lang}}</td>
-					</tr>
-				{{end}}
-			</tbody>
-		</table>
-	</div>
+
+							{{/* view at history point */}}
+							{{$viewCommitLink := printf "%s/src/commit/%s" $commitRepoLink (PathEscape $commitID)}}
+							{{if $.FileTreePath}}{{$viewCommitLink = printf "%s/%s" $viewCommitLink (PathEscapeSegments $.FileTreePath)}}{{end}}
+							<a class="btn interact-bg tw-p-2 view-commit-path" data-tooltip-content="{{ctx.Locale.Tr "repo.commits.view_path"}}" href="{{$viewCommitLink}}">{{svg "octicon-file-code"}}</a>
+						{{end}}
+					</td>
+				</tr>
+			{{end}}
+		</tbody>
+	</table>
+</div>

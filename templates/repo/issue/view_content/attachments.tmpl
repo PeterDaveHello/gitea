@@ -1,15 +1,42 @@
-{{- range .Attachments -}}
-<div class="twelve wide column" style="padding: 6px;">
-	<a target="_blank" rel="noopener noreferrer" href="{{.DownloadURL}}" title='{{$.ctx.i18n.Tr "repo.issues.attachment.open_tab" .Name}}'>
-	{{if FilenameIsImage .Name}}
-		<span class="ui image">{{svg "octicon-file-media" 16}}</span>
-	{{else}}
-		<span class="ui image">{{svg "octicon-desktop-download" 16}}</span>
+<div class="dropzone-attachments">
+	{{if .Attachments}}
+		<div class="divider"></div>
 	{{end}}
-		<span><strong>{{.Name}}</strong></span>
-	</a>
+	{{$hasThumbnails := false}}
+	{{- range $att := .Attachments -}}
+		<div class="tw-flex">
+			<div class="tw-flex-1 tw-p-2">
+				<a target="_blank" href="{{$att.DownloadURL ctx}}" title="{{ctx.Locale.Tr "repo.issues.attachment.open_tab" $att.Name}}">
+					{{if FilenameIsImage $att.Name}}
+						{{if not (StringUtils.Contains (StringUtils.ToString $.RenderedContent) $att.UUID)}}
+							{{$hasThumbnails = true}}
+						{{end}}
+						{{svg "octicon-file"}}
+					{{else}}
+						{{svg "octicon-desktop-download"}}
+					{{end}}
+					<span><strong>{{$att.Name}}</strong></span>
+				</a>
+			</div>
+			<div class="flex-text-block tw-p-2">
+				<span class="ui tw-text-text-light">{{$att.Size | FormatByteSize}}</span>
+			</div>
+		</div>
+	{{end -}}
+
+	{{if $hasThumbnails}}
+		<div class="divider"></div>
+		<div class="ui small thumbnails">
+			{{- range .Attachments -}}
+				{{if FilenameIsImage .Name}}
+					{{if not (StringUtils.Contains (StringUtils.ToString $.RenderedContent) .UUID)}}
+					<a target="_blank" href="{{.DownloadURL ctx}}">
+						<img loading="lazy" alt="{{.Name}}" src="{{.DownloadURL ctx}}" title="{{ctx.Locale.Tr "repo.issues.attachment.open_tab" .Name}}">
+					</a>
+					{{end}}
+				{{end}}
+			{{end -}}
+		</div>
+	{{end}}
+
 </div>
-<div class="four wide column" style="padding: 0px;">
-	<span class="ui text grey right">{{.Size | FileSize}}</span>
-</div>
-{{end -}}

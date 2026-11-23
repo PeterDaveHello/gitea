@@ -1,103 +1,137 @@
 // Copyright 2017 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
-package markup
+package orgmode
 
 import (
-	"bytes"
 	"fmt"
-	"html"
+	"html/template"
+	"io"
+	"strings"
 
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/markup"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/modules/highlight"
+	"gitea.dev/modules/htmlutil"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/markup"
+	"gitea.dev/modules/setting"
 
 	"github.com/niklasfasching/go-org/org"
 )
 
 func init() {
-	markup.RegisterParser(Parser{})
+	markup.RegisterRenderer(renderer{})
 }
 
-// Parser implements markup.Parser for orgmode
-type Parser struct {
-}
+// Renderer implements markup.Renderer for orgmode
+type renderer struct{}
 
-// Name implements markup.Parser
-func (Parser) Name() string {
+var (
+	_ markup.Renderer            = (*renderer)(nil)
+	_ markup.PostProcessRenderer = (*renderer)(nil)
+)
+
+func (renderer) Name() string {
 	return "orgmode"
 }
 
-// Extensions implements markup.Parser
-func (Parser) Extensions() []string {
-	return []string{".org"}
+func (renderer) NeedPostProcess() bool { return true }
+
+func (renderer) FileNamePatterns() []string {
+	return []string{"*.org"}
 }
 
-// Render renders orgmode rawbytes to HTML
-func Render(rawBytes []byte, urlPrefix string, metas map[string]string, isWiki bool) []byte {
+func (renderer) SanitizerRules() []setting.MarkupSanitizerRule {
+	return []setting.MarkupSanitizerRule{}
+}
+
+// Render renders orgmode raw bytes to HTML
+func Render(ctx *markup.RenderContext, input io.Reader, output io.Writer) error {
 	htmlWriter := org.NewHTMLWriter()
+	htmlWriter.HighlightCodeBlock = func(source, lang string, inline bool, params map[string]string) string {
+		defer func() {
+			if err := recover(); err != nil {
+				// catch the panic, log the error and return empty result
+				log.Error("Panic in HighlightCodeBlock: %v\n%s", err, log.Stack(2))
+			}
+		}()
 
-	renderer := &Renderer{
-		HTMLWriter: htmlWriter,
-		URLPrefix:  urlPrefix,
-		IsWiki:     isWiki,
+		preAttrs, codeAttrs := highlight.CodeBlockAttributes(lang)
+		lexer := highlight.DetectChromaLexerByFileName("", lang) // don't use content to detect, it is too slow
+		sb := &strings.Builder{}
+		_ = ctx.RenderInternal.FormatWithSafeAttrsf(sb, `<pre %s><code %s>`, preAttrs, codeAttrs)
+		_, _ = sb.WriteString(string(highlight.RenderCodeByLexer(lexer, source)))
+		_, _ = sb.WriteString("</code></pre>")
+		return sb.String()
 	}
 
-	htmlWriter.ExtendingWriter = renderer
+	w := &orgWriter{rctx: ctx, HTMLWriter: htmlWriter}
+	htmlWriter.ExtendingWriter = w
 
-	res, err := org.New().Silent().Parse(bytes.NewReader(rawBytes), "").Write(renderer)
+	cfg := org.New()
+	cfg.ReadFile = func(path string) ([]byte, error) {
+		// actually the orgmode render doesn't support rendering the content from the content again,
+		// so just leave the plain text to end users
+		content := fmt.Sprintf("#+INCLUDE: [[%s]]", path)
+		return []byte(content), nil
+	}
+	doc := cfg.Silent().Parse(input, "")
+	res, err := doc.Write(w)
 	if err != nil {
-		log.Error("Panic in orgmode.Render: %v Just returning the rawBytes", err)
-		return rawBytes
+		return fmt.Errorf("orgmode.Render failed: %w", err)
 	}
-	return []byte(res)
+	_, err = io.Copy(output, strings.NewReader(res))
+	return err
 }
 
-// RenderString reners orgmode string to HTML string
-func RenderString(rawContent string, urlPrefix string, metas map[string]string, isWiki bool) string {
-	return string(Render([]byte(rawContent), urlPrefix, metas, isWiki))
+// RenderString renders orgmode string to HTML string
+func RenderString(ctx *markup.RenderContext, content string) (string, error) {
+	var buf strings.Builder
+	if err := Render(ctx, strings.NewReader(content), &buf); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
-// Render reners orgmode string to HTML string
-func (Parser) Render(rawBytes []byte, urlPrefix string, metas map[string]string, isWiki bool) []byte {
-	return Render(rawBytes, urlPrefix, metas, isWiki)
+// Render renders orgmode string to HTML string
+func (renderer) Render(ctx *markup.RenderContext, input io.Reader, output io.Writer) error {
+	return Render(ctx, input, output)
 }
 
-// Renderer implements org.Writer
-type Renderer struct {
+type orgWriter struct {
 	*org.HTMLWriter
-	URLPrefix string
-	IsWiki    bool
+	rctx *markup.RenderContext
 }
 
-var byteMailto = []byte("mailto:")
+var _ org.Writer = (*orgWriter)(nil)
+
+func (r *orgWriter) resolveLink(link string) string {
+	return strings.TrimPrefix(link, "file:")
+}
 
 // WriteRegularLink renders images, links or videos
-func (r *Renderer) WriteRegularLink(l org.RegularLink) {
-	link := []byte(html.EscapeString(l.URL))
-	if l.Protocol == "file" {
-		link = link[len("file:"):]
-	}
-	if len(link) > 0 && !markup.IsLink(link) &&
-		link[0] != '#' && !bytes.HasPrefix(link, byteMailto) {
-		lnk := string(link)
-		if r.IsWiki {
-			lnk = util.URLJoin("wiki", lnk)
-		}
-		link = []byte(util.URLJoin(r.URLPrefix, lnk))
-	}
-
-	description := string(link)
-	if l.Description != nil {
-		description = r.WriteNodesAsString(l.Description...)
-	}
+func (r *orgWriter) WriteRegularLink(l org.RegularLink) {
+	link := r.resolveLink(l.URL)
+	// Inspired by https://github.com/niklasfasching/go-org/blob/6eb20dbda93cb88c3503f7508dc78cbbc639378f/org/html_writer.go#L406-L427
 	switch l.Kind() {
 	case "image":
-		r.WriteString(fmt.Sprintf(`<img src="%s" alt="%s" title="%s" />`, link, description, description))
+		if l.Description == nil {
+			_, _ = htmlutil.HTMLPrintf(r, `<img src="%s" alt="%s">`, link, link)
+		} else {
+			imageSrc := r.resolveLink(org.String(l.Description...))
+			_, _ = htmlutil.HTMLPrintf(r, `<a href="%s"><img src="%s" alt="%s"></a>`, link, imageSrc, imageSrc)
+		}
 	case "video":
-		r.WriteString(fmt.Sprintf(`<video src="%s" title="%s">%s</video>`, link, description, description))
+		if l.Description == nil {
+			_, _ = htmlutil.HTMLPrintf(r, `<video src="%s">%s</video>`, link, link)
+		} else {
+			videoSrc := r.resolveLink(org.String(l.Description...))
+			_, _ = htmlutil.HTMLPrintf(r, `<a href="%s"><video src="%s">%s</video></a>`, link, videoSrc, videoSrc)
+		}
 	default:
-		r.WriteString(fmt.Sprintf(`<a href="%s" title="%s">%s</a>`, link, description, description))
+		var description any = link
+		if l.Description != nil {
+			description = template.HTML(r.WriteNodesAsString(l.Description...)) // orgmode HTMLWriter outputs HTML content
+		}
+		_, _ = htmlutil.HTMLPrintf(r, `<a href="%s">%s</a>`, link, description)
 	}
 }

@@ -1,6 +1,5 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package lfs
 
@@ -8,122 +7,159 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"hash"
 	"io"
 	"os"
-	"path/filepath"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/storage"
 )
 
 var (
-	errHashMismatch = errors.New("Content hash does not match OID")
-	errSizeMismatch = errors.New("Content size does not match")
+	// ErrHashMismatch occurs if the content has does not match OID
+	ErrHashMismatch = errors.New("content hash does not match OID")
+	// ErrSizeMismatch occurs if the content size does not match
+	ErrSizeMismatch = errors.New("content size does not match")
 )
 
 // ContentStore provides a simple file system based storage.
 type ContentStore struct {
-	BasePath string
+	ObjectStorage storage.ObjectStorage
+}
+
+// NewContentStore creates the default ContentStore
+func NewContentStore() *ContentStore {
+	contentStore := &ContentStore{ObjectStorage: storage.LFS}
+	return contentStore
 }
 
 // Get takes a Meta object and retrieves the content from the store, returning
-// it as an io.Reader. If fromByte > 0, the reader starts from that byte
-func (s *ContentStore) Get(meta *models.LFSMetaObject, fromByte int64) (io.ReadCloser, error) {
-	path := filepath.Join(s.BasePath, transformKey(meta.Oid))
-
-	f, err := os.Open(path)
+// it as an io.ReadSeekCloser.
+func (s *ContentStore) Get(pointer Pointer) (storage.Object, error) {
+	f, err := s.ObjectStorage.Open(pointer.RelativePath())
 	if err != nil {
-		log.Error("Whilst trying to read LFS OID[%s]: Unable to open %s Error: %v", meta.Oid, path, err)
+		log.Error("Whilst trying to read LFS OID[%s]: Unable to open Error: %v", pointer.Oid, err)
 		return nil, err
-	}
-	if fromByte > 0 {
-		_, err = f.Seek(fromByte, os.SEEK_CUR)
-		if err != nil {
-			log.Error("Whilst trying to read LFS OID[%s]: Unable to seek to %d Error: %v", meta.Oid, fromByte, err)
-		}
 	}
 	return f, err
 }
 
 // Put takes a Meta object and an io.Reader and writes the content to the store.
-func (s *ContentStore) Put(meta *models.LFSMetaObject, r io.Reader) error {
-	path := filepath.Join(s.BasePath, transformKey(meta.Oid))
-	tmpPath := path + ".tmp"
+func (s *ContentStore) Put(pointer Pointer, r io.Reader) error {
+	p := pointer.RelativePath()
 
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		log.Error("Whilst putting LFS OID[%s]: Unable to create the LFS directory: %s Error: %v", meta.Oid, dir, err)
-		return err
-	}
+	// Wrap the provided reader with an inline hashing and size checker
+	wrappedRd := newHashingReader(pointer.Size, pointer.Oid, r)
 
-	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0640)
+	// now pass the wrapped reader to Save - if there is a size mismatch or hash mismatch then
+	// the errors returned by the newHashingReader should percolate up to here
+	written, err := s.ObjectStorage.Save(p, wrappedRd, pointer.Size)
 	if err != nil {
-		log.Error("Whilst putting LFS OID[%s]: Unable to open temporary file for writing: %s Error: %v", tmpPath, err)
+		log.Error("Whilst putting LFS OID[%s]: Failed to copy to tmpPath: %s Error: %v", pointer.Oid, p, err)
 		return err
 	}
-	defer func() {
-		if err := util.Remove(tmpPath); err != nil {
-			log.Warn("Unable to remove temporary path: %s: Error: %v", tmpPath, err)
+
+	// check again whether there is any error during the Save operation
+	// because some errors might be ignored by the Reader's caller
+	if wrappedRd.lastError != nil && !errors.Is(wrappedRd.lastError, io.EOF) {
+		err = wrappedRd.lastError
+	} else if written != pointer.Size {
+		err = ErrSizeMismatch
+	}
+
+	// if the upload failed, try to delete the file
+	if err != nil {
+		if errDel := s.ObjectStorage.Delete(p); errDel != nil {
+			log.Error("Cleaning the LFS OID[%s] failed: %v", pointer.Oid, errDel)
 		}
-	}()
-
-	hash := sha256.New()
-	hw := io.MultiWriter(hash, file)
-
-	written, err := io.Copy(hw, r)
-	if err != nil {
-		log.Error("Whilst putting LFS OID[%s]: Failed to copy to tmpPath: %s Error: %v", meta.Oid, tmpPath, err)
-		file.Close()
-		return err
-	}
-	file.Close()
-
-	if written != meta.Size {
-		return errSizeMismatch
 	}
 
-	shaStr := hex.EncodeToString(hash.Sum(nil))
-	if shaStr != meta.Oid {
-		return errHashMismatch
-	}
-
-	if err := os.Rename(tmpPath, path); err != nil {
-		log.Error("Whilst putting LFS OID[%s]: Unable to move tmp file to final destination: %s Error: %v", meta.Oid, path, err)
-		return err
-	}
-
-	return nil
+	return err
 }
 
-// Exists returns true if the object exists in the content store.
-func (s *ContentStore) Exists(meta *models.LFSMetaObject) bool {
-	path := filepath.Join(s.BasePath, transformKey(meta.Oid))
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return false
+func (s *ContentStore) Stat(pointer Pointer) (os.FileInfo, error) {
+	return s.ObjectStorage.Stat(pointer.RelativePath())
+}
+
+func (s *ContentStore) Exists(pointer Pointer) (bool, error) {
+	_, err := s.Stat(pointer)
+	if os.IsNotExist(err) {
+		return false, nil
+	} else if err == nil {
+		return true, nil
 	}
-	return true
+	return false, err
 }
 
 // Verify returns true if the object exists in the content store and size is correct.
-func (s *ContentStore) Verify(meta *models.LFSMetaObject) (bool, error) {
-	path := filepath.Join(s.BasePath, transformKey(meta.Oid))
-
-	fi, err := os.Stat(path)
-	if os.IsNotExist(err) || err == nil && fi.Size() != meta.Size {
+func (s *ContentStore) Verify(pointer Pointer) (bool, error) {
+	p := pointer.RelativePath()
+	fi, err := s.ObjectStorage.Stat(p)
+	if os.IsNotExist(err) || (err == nil && fi.Size() != pointer.Size) {
 		return false, nil
 	} else if err != nil {
-		log.Error("Unable stat file: %s for LFS OID[%s] Error: %v", path, meta.Oid, err)
+		log.Error("Unable stat file: %s for LFS OID[%s] Error: %v", p, pointer.Oid, err)
 		return false, err
 	}
 
 	return true, nil
 }
 
-func transformKey(key string) string {
-	if len(key) < 5 {
-		return key
+// ReadMetaObject will read a git_model.LFSMetaObject and return a reader
+func ReadMetaObject(pointer Pointer) (storage.Object, error) {
+	contentStore := NewContentStore()
+	return contentStore.Get(pointer)
+}
+
+type hashingReader struct {
+	internal     io.Reader
+	currentSize  int64
+	expectedSize int64
+	hash         hash.Hash
+	expectedHash string
+	lastError    error
+}
+
+// recordError records the last error during the Save operation
+// Some callers of the Reader doesn't respect the returned "err"
+// For example, MinIO's Put will ignore errors if the written size could equal to expected size
+// So we must remember the error by ourselves,
+// and later check again whether ErrSizeMismatch or ErrHashMismatch occurs during the Save operation
+func (r *hashingReader) recordError(err error) error {
+	r.lastError = err
+	return err
+}
+
+func (r *hashingReader) Read(b []byte) (int, error) {
+	n, err := r.internal.Read(b)
+
+	if n > 0 {
+		r.currentSize += int64(n)
+		wn, werr := r.hash.Write(b[:n])
+		if wn != n || werr != nil {
+			return n, r.recordError(werr)
+		}
 	}
 
-	return filepath.Join(key[0:2], key[2:4], key[4:])
+	if errors.Is(err, io.EOF) || r.currentSize >= r.expectedSize {
+		if r.currentSize != r.expectedSize {
+			return n, r.recordError(ErrSizeMismatch)
+		}
+
+		shaStr := hex.EncodeToString(r.hash.Sum(nil))
+		if shaStr != r.expectedHash {
+			return n, r.recordError(ErrHashMismatch)
+		}
+	}
+
+	return n, r.recordError(err)
+}
+
+func newHashingReader(expectedSize int64, expectedHash string, reader io.Reader) *hashingReader {
+	return &hashingReader{
+		internal:     reader,
+		expectedSize: expectedSize,
+		expectedHash: expectedHash,
+		hash:         sha256.New(),
+	}
 }

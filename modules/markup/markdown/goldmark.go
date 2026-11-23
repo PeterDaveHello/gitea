@@ -1,21 +1,17 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package markdown
 
 import (
-	"bytes"
 	"fmt"
-	"regexp"
-	"strings"
 
-	"code.gitea.io/gitea/modules/markup"
-	"code.gitea.io/gitea/modules/markup/common"
-	"code.gitea.io/gitea/modules/setting"
-	giteautil "code.gitea.io/gitea/modules/util"
+	"gitea.dev/modules/container"
+	"gitea.dev/modules/highlight"
+	"gitea.dev/modules/markup"
+	"gitea.dev/modules/markup/internal"
+	"gitea.dev/modules/markup/markdown/math"
 
-	meta "github.com/yuin/goldmark-meta"
 	"github.com/yuin/goldmark/ast"
 	east "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/parser"
@@ -25,38 +21,41 @@ import (
 	"github.com/yuin/goldmark/util"
 )
 
-var byteMailto = []byte("mailto:")
-
-// Header holds the data about a header.
-type Header struct {
-	Level int
-	Text  string
-	ID    string
+// ASTTransformer is a default transformer of the goldmark tree.
+type ASTTransformer struct {
+	renderInternal *internal.RenderInternal
+	attentionTypes container.Set[string]
 }
 
-// ASTTransformer is a default transformer of the goldmark tree.
-type ASTTransformer struct{}
+func NewASTTransformer(renderInternal *internal.RenderInternal) *ASTTransformer {
+	return &ASTTransformer{
+		renderInternal: renderInternal,
+		attentionTypes: container.SetOf("note", "tip", "important", "warning", "caution"),
+	}
+}
+
+func (g *ASTTransformer) applyElementDir(n ast.Node) {
+	if !markup.RenderBehaviorForTesting.DisableAdditionalAttributes {
+		n.SetAttributeString("dir", "auto")
+	}
+}
 
 // Transform transforms the given AST tree.
 func (g *ASTTransformer) Transform(node *ast.Document, reader text.Reader, pc parser.Context) {
-	metaData := meta.GetItems(pc)
 	firstChild := node.FirstChild()
-	createTOC := false
-	var toc = []Header{}
-	rc := &RenderConfig{
-		Meta: "table",
-		Icon: "table",
-		Lang: "",
-	}
-	if metaData != nil {
-		rc.ToRenderConfig(metaData)
+	ctx := pc.Get(renderContextKey).(*markup.RenderContext) //nolint:forcetypeassert // the renderer always seeds this key before parsing
+	rc := pc.Get(renderConfigKey).(*RenderConfig)           //nolint:forcetypeassert // the renderer always seeds this key before parsing
 
-		metaNode := rc.toMetaNode(metaData)
+	tocMode := ""
+	if rc.yamlNode != nil {
+		metaNode := rc.toMetaNode(g)
 		if metaNode != nil {
 			node.InsertBefore(node, firstChild, metaNode)
 		}
-		createTOC = rc.TOC
-		toc = make([]Header, 0, 100)
+		tocMode = rc.TOC
+	}
+	if ctx.RenderOptions.FeedExcerpt {
+		filterFeedExcerpt(node)
 	}
 
 	_ = ast.Walk(node, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -65,173 +64,65 @@ func (g *ASTTransformer) Transform(node *ast.Document, reader text.Reader, pc pa
 		}
 
 		switch v := n.(type) {
-		case *ast.Heading:
-			if createTOC {
-				text := n.Text(reader.Source())
-				header := Header{
-					Text:  util.BytesToReadOnlyString(text),
-					Level: v.Level,
-				}
-				if id, found := v.AttributeString("id"); found {
-					header.ID = util.BytesToReadOnlyString(id.([]byte))
-				}
-				toc = append(toc, header)
-			}
-		case *ast.Image:
-			// Images need two things:
-			//
-			// 1. Their src needs to munged to be a real value
-			// 2. If they're not wrapped with a link they need a link wrapper
-
-			// Check if the destination is a real link
-			link := v.Destination
-			if len(link) > 0 && !markup.IsLink(link) {
-				prefix := pc.Get(urlPrefixKey).(string)
-				if pc.Get(isWikiKey).(bool) {
-					prefix = giteautil.URLJoin(prefix, "wiki", "raw")
-				}
-				prefix = strings.Replace(prefix, "/src/", "/media/", 1)
-
-				lnk := string(link)
-				lnk = giteautil.URLJoin(prefix, lnk)
-				link = []byte(lnk)
-			}
-			v.Destination = link
-
-			parent := n.Parent()
-			// Create a link around image only if parent is not already a link
-			if _, ok := parent.(*ast.Link); !ok && parent != nil {
-				wrap := ast.NewLink()
-				wrap.Destination = link
-				wrap.Title = v.Title
-				parent.ReplaceChild(parent, n, wrap)
-				wrap.AppendChild(wrap, n)
-			}
-		case *ast.Link:
-			// Links need their href to munged to be a real value
-			link := v.Destination
-			if len(link) > 0 && !markup.IsLink(link) &&
-				link[0] != '#' && !bytes.HasPrefix(link, byteMailto) {
-				// special case: this is not a link, a hash link or a mailto:, so it's a
-				// relative URL
-				lnk := string(link)
-				if pc.Get(isWikiKey).(bool) {
-					lnk = giteautil.URLJoin("wiki", lnk)
-				}
-				link = []byte(giteautil.URLJoin(pc.Get(urlPrefixKey).(string), lnk))
-			}
-			if len(link) > 0 && link[0] == '#' {
-				link = []byte("#user-content-" + string(link)[1:])
-			}
-			v.Destination = link
+		case *ast.Paragraph:
+			g.applyElementDir(v)
 		case *ast.List:
-			if v.HasChildren() {
-				children := make([]ast.Node, 0, v.ChildCount())
-				child := v.FirstChild()
-				for child != nil {
-					children = append(children, child)
-					child = child.NextSibling()
-				}
-				v.RemoveChildren(v)
-
-				for _, child := range children {
-					listItem := child.(*ast.ListItem)
-					if !child.HasChildren() || !child.FirstChild().HasChildren() {
-						v.AppendChild(v, child)
-						continue
-					}
-					taskCheckBox, ok := child.FirstChild().FirstChild().(*east.TaskCheckBox)
-					if !ok {
-						v.AppendChild(v, child)
-						continue
-					}
-					newChild := NewTaskCheckBoxListItem(listItem)
-					newChild.IsChecked = taskCheckBox.IsChecked
-					newChild.SetAttributeString("class", []byte("task-list-item"))
-					v.AppendChild(v, newChild)
-				}
-			}
+			g.transformList(ctx, v, rc)
 		case *ast.Text:
 			if v.SoftLineBreak() && !v.HardLineBreak() {
-				renderMetas := pc.Get(renderMetasKey).(map[string]string)
-				mode := renderMetas["mode"]
-				if mode != "document" {
-					v.SetHardLineBreak(setting.Markdown.EnableHardLineBreakInComments)
-				} else {
-					v.SetHardLineBreak(setting.Markdown.EnableHardLineBreakInDocuments)
-				}
+				newLineHardBreak := ctx.RenderOptions.Metas["markdownNewLineHardBreak"] == "true"
+				v.SetHardLineBreak(newLineHardBreak)
 			}
+		case *ast.CodeSpan:
+			g.transformCodeSpan(ctx, v, reader)
+		case *ast.FencedCodeBlock:
+			g.transformFencedCodeblock(v, reader)
+		case *ast.Blockquote:
+			return g.transformBlockquote(v, reader)
 		}
 		return ast.WalkContinue, nil
 	})
 
-	if createTOC && len(toc) > 0 {
-		lang := rc.Lang
-		if len(lang) == 0 {
-			lang = setting.Langs[0]
-		}
-		tocNode := createTOCNode(toc, lang)
-		if tocNode != nil {
-			node.InsertBefore(node, firstChild, tocNode)
+	if ctx.RenderOptions.EnableHeadingIDGeneration {
+		showTocInMain := tocMode == "true" /* old behavior, in main view */ || tocMode == "main"
+		showTocInSidebar := !showTocInMain && tocMode != "false" // not hidden, not main, then show it in sidebar
+		switch {
+		case showTocInMain:
+			ctx.TocShowInSection = markup.TocShowInMain
+		case showTocInSidebar:
+			ctx.TocShowInSection = markup.TocShowInSidebar
 		}
 	}
 
-	if len(rc.Lang) > 0 {
+	if rc.Lang != "" {
 		node.SetAttributeString("lang", []byte(rc.Lang))
 	}
 }
 
-type prefixedIDs struct {
-	values map[string]bool
-}
-
-// Generate generates a new element id.
-func (p *prefixedIDs) Generate(value []byte, kind ast.NodeKind) []byte {
-	dft := []byte("id")
-	if kind == ast.KindHeading {
-		dft = []byte("heading")
-	}
-	return p.GenerateWithDefault(value, dft)
-}
-
-// Generate generates a new element id.
-func (p *prefixedIDs) GenerateWithDefault(value []byte, dft []byte) []byte {
-	result := common.CleanValue(value)
-	if len(result) == 0 {
-		result = dft
-	}
-	if !bytes.HasPrefix(result, []byte("user-content-")) {
-		result = append([]byte("user-content-"), result...)
-	}
-	if _, ok := p.values[util.BytesToReadOnlyString(result)]; !ok {
-		p.values[util.BytesToReadOnlyString(result)] = true
-		return result
-	}
-	for i := 1; ; i++ {
-		newResult := fmt.Sprintf("%s-%d", result, i)
-		if _, ok := p.values[newResult]; !ok {
-			p.values[newResult] = true
-			return []byte(newResult)
+func filterFeedExcerpt(parent ast.Node) {
+	for node := parent.FirstChild(); node != nil; {
+		next := node.NextSibling()
+		switch node.Kind() {
+		case ast.KindText, ast.KindAutoLink, math.KindInline:
+		case ast.KindParagraph, ast.KindHeading, ast.KindTextBlock, ast.KindBlockquote, ast.KindList, ast.KindListItem,
+			ast.KindEmphasis, ast.KindCodeSpan, ast.KindLink,
+			east.KindStrikethrough, east.KindDefinitionList, east.KindDefinitionTerm, east.KindDefinitionDescription:
+			filterFeedExcerpt(node)
+			if !node.HasChildren() {
+				parent.RemoveChild(parent, node)
+			}
+		default:
+			parent.RemoveChild(parent, node)
 		}
+		node = next
 	}
 }
 
-// Put puts a given element id to the used ids table.
-func (p *prefixedIDs) Put(value []byte) {
-	p.values[util.BytesToReadOnlyString(value)] = true
-}
-
-func newPrefixedIDs() *prefixedIDs {
-	return &prefixedIDs{
-		values: map[string]bool{},
-	}
-}
-
-// NewHTMLRenderer creates a HTMLRenderer to render
-// in the gitea form.
-func NewHTMLRenderer(opts ...html.Option) renderer.NodeRenderer {
+// NewHTMLRenderer creates a HTMLRenderer to render in the gitea form.
+func NewHTMLRenderer(renderInternal *internal.RenderInternal, opts ...html.Option) renderer.NodeRenderer {
 	r := &HTMLRenderer{
-		Config: html.NewConfig(),
+		renderInternal: renderInternal,
+		Config:         html.NewConfig(),
 	}
 	for _, opt := range opts {
 		opt.SetHTMLOption(&r.Config)
@@ -243,6 +134,7 @@ func NewHTMLRenderer(opts ...html.Option) renderer.NodeRenderer {
 // renders gitea specific features.
 type HTMLRenderer struct {
 	html.Config
+	renderInternal *internal.RenderInternal
 }
 
 // RegisterFuncs implements renderer.NodeRenderer.RegisterFuncs.
@@ -250,20 +142,47 @@ func (r *HTMLRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
 	reg.Register(ast.KindDocument, r.renderDocument)
 	reg.Register(KindDetails, r.renderDetails)
 	reg.Register(KindSummary, r.renderSummary)
-	reg.Register(KindIcon, r.renderIcon)
-	reg.Register(KindTaskCheckBoxListItem, r.renderTaskCheckBoxListItem)
+	reg.Register(ast.KindCodeSpan, r.renderCodeSpan)
+	reg.Register(ast.KindCodeBlock, r.renderCodeBlock)
+	reg.Register(ast.KindFencedCodeBlock, r.renderCodeBlock)
+	reg.Register(KindAttention, r.renderAttention)
 	reg.Register(east.KindTaskCheckBox, r.renderTaskCheckBox)
+	reg.Register(KindRawHTML, r.renderRawHTML)
+}
+
+func (r *HTMLRenderer) renderCodeBlock(w util.BufWriter, source []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
+	if entering {
+		var language string
+		if fenced, ok := n.(*ast.FencedCodeBlock); ok {
+			language = string(fenced.Language(source))
+		}
+		preAttrs, codeAttrs := highlight.CodeBlockAttributes(language)
+		err := r.renderInternal.FormatWithSafeAttrsf(w, `<div class="code-block-container code-overflow-scroll"><pre %s><code %s>`, preAttrs, codeAttrs)
+		if err != nil {
+			return ast.WalkStop, err
+		}
+
+		code := n.Lines().Value(source)
+		lexer := highlight.DetectChromaLexerByFileName("", language)
+		renderedHTML := highlight.RenderCodeByLexer(lexer, string(code))
+		if _, err = w.WriteString(string(renderedHTML)); err != nil {
+			return ast.WalkStop, err
+		}
+	} else {
+		if _, err := w.WriteString("</code></pre></div>"); err != nil {
+			return ast.WalkStop, err
+		}
+	}
+	return ast.WalkContinue, nil
 }
 
 func (r *HTMLRenderer) renderDocument(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
-	n := node.(*ast.Document)
-
-	if val, has := n.AttributeString("lang"); has {
+	if val, has := node.AttributeString("lang"); has {
 		var err error
 		if entering {
 			_, err = w.WriteString("<div")
 			if err == nil {
-				_, err = w.WriteString(fmt.Sprintf(` lang=%q`, val))
+				_, err = fmt.Fprintf(w, ` lang=%q`, val)
 			}
 			if err == nil {
 				_, err = w.WriteRune('>')
@@ -283,7 +202,11 @@ func (r *HTMLRenderer) renderDocument(w util.BufWriter, source []byte, node ast.
 func (r *HTMLRenderer) renderDetails(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	var err error
 	if entering {
-		_, err = w.WriteString("<details>")
+		if _, err = w.WriteString("<details"); err != nil {
+			return ast.WalkStop, err
+		}
+		html.RenderAttributes(w, node, nil)
+		_, err = w.WriteString(">")
 	} else {
 		_, err = w.WriteString("</details>")
 	}
@@ -310,72 +233,14 @@ func (r *HTMLRenderer) renderSummary(w util.BufWriter, source []byte, node ast.N
 	return ast.WalkContinue, nil
 }
 
-var validNameRE = regexp.MustCompile("^[a-z ]+$")
-
-func (r *HTMLRenderer) renderIcon(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *HTMLRenderer) renderRawHTML(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if !entering {
 		return ast.WalkContinue, nil
 	}
-
-	n := node.(*Icon)
-
-	name := strings.TrimSpace(strings.ToLower(string(n.Name)))
-
-	if len(name) == 0 {
-		// skip this
-		return ast.WalkContinue, nil
-	}
-
-	if !validNameRE.MatchString(name) {
-		// skip this
-		return ast.WalkContinue, nil
-	}
-
-	var err error
-	_, err = w.WriteString(fmt.Sprintf(`<i class="icon %s"></i>`, name))
-
+	n := node.(*RawHTML) //nolint:forcetypeassert // registered for KindRawHTML only
+	_, err := w.WriteString(string(r.renderInternal.ProtectSafeAttrs(n.rawHTML)))
 	if err != nil {
 		return ast.WalkStop, err
 	}
-
-	return ast.WalkContinue, nil
-}
-
-func (r *HTMLRenderer) renderTaskCheckBoxListItem(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
-	n := node.(*TaskCheckBoxListItem)
-	if entering {
-		if n.Attributes() != nil {
-			_, _ = w.WriteString("<li")
-			html.RenderAttributes(w, n, html.ListItemAttributeFilter)
-			_ = w.WriteByte('>')
-		} else {
-			_, _ = w.WriteString("<li>")
-		}
-		end := ">"
-		if r.XHTML {
-			end = " />"
-		}
-		var err error
-		if n.IsChecked {
-			_, err = w.WriteString(`<span class="ui checked checkbox"><input type="checkbox" checked="" readonly="readonly"` + end + `<label>`)
-		} else {
-			_, err = w.WriteString(`<span class="ui checkbox"><input type="checkbox" readonly="readonly"` + end + `<label>`)
-		}
-		if err != nil {
-			return ast.WalkStop, err
-		}
-		fc := n.FirstChild()
-		if fc != nil {
-			if _, ok := fc.(*ast.TextBlock); !ok {
-				_ = w.WriteByte('\n')
-			}
-		}
-	} else {
-		_, _ = w.WriteString("</label></span></li>\n")
-	}
-	return ast.WalkContinue, nil
-}
-
-func (r *HTMLRenderer) renderTaskCheckBox(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	return ast.WalkContinue, nil
 }

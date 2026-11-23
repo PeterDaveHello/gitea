@@ -1,20 +1,45 @@
 // Copyright 2018 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package repo
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/modules/upload"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/modules/util"
+	"gitea.dev/modules/web"
+	attachment_service "gitea.dev/services/attachment"
+	"gitea.dev/services/context"
+	"gitea.dev/services/context/upload"
+	"gitea.dev/services/convert"
 )
+
+func checkReleaseMatchRepo(ctx *context.APIContext, releaseID int64) bool {
+	release, err := repo_model.GetReleaseByID(ctx, releaseID)
+	if err != nil {
+		if repo_model.IsErrReleaseNotExist(err) {
+			ctx.APIErrorNotFound()
+			return false
+		}
+		ctx.APIErrorInternal(err)
+		return false
+	}
+	if release.RepoID != ctx.Repo.Repository.ID {
+		ctx.APIErrorNotFound()
+		return false
+	}
+	if release.IsDraft && !canAccessReleaseDraft(ctx) {
+		ctx.APIErrorNotFound()
+		return false
+	}
+	return true
+}
 
 // GetReleaseAttachment gets a single attachment of the release
 func GetReleaseAttachment(ctx *context.APIContext) {
@@ -49,21 +74,31 @@ func GetReleaseAttachment(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/Attachment"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	releaseID := ctx.ParamsInt64(":id")
-	attachID := ctx.ParamsInt64(":asset")
-	attach, err := models.GetAttachmentByID(attachID)
+	releaseID := ctx.PathParamInt64("id")
+	if !checkReleaseMatchRepo(ctx, releaseID) {
+		return
+	}
+
+	attachID := ctx.PathParamInt64("attachment_id")
+	attach, err := repo_model.GetAttachmentByID(ctx, attachID)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetAttachmentByID", err)
+		if repo_model.IsErrAttachmentNotExist(err) {
+			ctx.APIErrorNotFound()
+			return
+		}
+		ctx.APIErrorInternal(err)
 		return
 	}
 	if attach.ReleaseID != releaseID {
 		log.Info("User requested attachment is not in release, release_id %v, attachment_id: %v", releaseID, attachID)
-		ctx.NotFound()
+		ctx.APIErrorNotFound()
 		return
 	}
 	// FIXME Should prove the existence of the given repo, but results in unnecessary database requests
-	ctx.JSON(http.StatusOK, attach.APIFormat())
+	ctx.JSON(http.StatusOK, convert.ToAPIAttachment(ctx, ctx.Repo.Repository, attach))
 }
 
 // ListReleaseAttachments lists all attachments of the release
@@ -93,22 +128,32 @@ func ListReleaseAttachments(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/AttachmentList"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	releaseID := ctx.ParamsInt64(":id")
-	release, err := models.GetReleaseByID(releaseID)
+	releaseID := ctx.PathParamInt64("id")
+	release, err := repo_model.GetReleaseByID(ctx, releaseID)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetReleaseByID", err)
+		if repo_model.IsErrReleaseNotExist(err) {
+			ctx.APIErrorNotFound()
+			return
+		}
+		ctx.APIErrorInternal(err)
 		return
 	}
 	if release.RepoID != ctx.Repo.Repository.ID {
-		ctx.NotFound()
+		ctx.APIErrorNotFound()
 		return
 	}
-	if err := release.LoadAttributes(); err != nil {
-		ctx.Error(http.StatusInternalServerError, "LoadAttributes", err)
+	if release.IsDraft && !canAccessReleaseDraft(ctx) {
+		ctx.APIErrorNotFound()
 		return
 	}
-	ctx.JSON(http.StatusOK, release.APIFormat().Attachments)
+	if err := release.LoadAttributes(ctx); err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+	ctx.JSON(http.StatusOK, convert.ToAPIRelease(ctx, ctx.Repo.Repository, release).Attachments)
 }
 
 // CreateReleaseAttachment creates an attachment and saves the given file
@@ -120,6 +165,7 @@ func CreateReleaseAttachment(ctx *context.APIContext) {
 	// - application/json
 	// consumes:
 	// - multipart/form-data
+	// - application/octet-stream
 	// parameters:
 	// - name: owner
 	//   in: path
@@ -146,69 +192,78 @@ func CreateReleaseAttachment(ctx *context.APIContext) {
 	//   in: formData
 	//   description: attachment to upload
 	//   type: file
-	//   required: true
+	//   required: false
 	// responses:
 	//   "201":
 	//     "$ref": "#/responses/Attachment"
-	//   "400":
+	//   default:
 	//     "$ref": "#/responses/error"
 
 	// Check if attachments are enabled
 	if !setting.Attachment.Enabled {
-		ctx.NotFound("Attachment is not enabled")
+		ctx.APIErrorNotFound("attachment is not enabled")
 		return
 	}
 
 	// Check if release exists an load release
-	releaseID := ctx.ParamsInt64(":id")
-	release, err := models.GetReleaseByID(releaseID)
-	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetReleaseByID", err)
+	releaseID := ctx.PathParamInt64("id")
+	if !checkReleaseMatchRepo(ctx, releaseID) {
 		return
 	}
 
 	// Get uploaded file from request
-	file, header, err := ctx.GetFile("attachment")
-	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetFile", err)
+	var filename string
+	var uploaderFile *attachment_service.UploaderFile
+	if strings.HasPrefix(strings.ToLower(ctx.Req.Header.Get("Content-Type")), "multipart/form-data") {
+		file, header, err := ctx.Req.FormFile("attachment")
+		if err != nil {
+			ctx.APIErrorInternal(err)
+			return
+		}
+		defer file.Close()
+
+		filename = header.Filename
+		if name := ctx.FormString("name"); name != "" {
+			filename = name
+		}
+		uploaderFile = attachment_service.NewLimitedUploaderKnownSize(file, header.Size)
+	} else {
+		filename = ctx.FormString("name")
+		uploaderFile = attachment_service.NewLimitedUploaderMaxBytesReader(ctx.Req.Body, ctx.Resp)
+	}
+
+	if filename == "" {
+		ctx.APIError(http.StatusBadRequest, "Could not determine name of attachment.")
 		return
-	}
-	defer file.Close()
-
-	buf := make([]byte, 1024)
-	n, _ := file.Read(buf)
-	if n > 0 {
-		buf = buf[:n]
-	}
-
-	// Check if the filetype is allowed by the settings
-	err = upload.VerifyAllowedContentType(buf, strings.Split(setting.Attachment.AllowedTypes, ","))
-	if err != nil {
-		ctx.Error(http.StatusBadRequest, "DetectContentType", err)
-		return
-	}
-
-	var filename = header.Filename
-	if query := ctx.Query("name"); query != "" {
-		filename = query
 	}
 
 	// Create a new attachment and save the file
-	attach, err := models.NewAttachment(&models.Attachment{
-		UploaderID: ctx.User.ID,
+	attach, err := attachment_service.UploadAttachmentForRelease(ctx, uploaderFile, &repo_model.Attachment{
 		Name:       filename,
-		ReleaseID:  release.ID,
-	}, buf, file)
+		UploaderID: ctx.Doer.ID,
+		RepoID:     ctx.Repo.Repository.ID,
+		ReleaseID:  releaseID,
+	})
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "NewAttachment", err)
+		if upload.IsErrFileTypeForbidden(err) {
+			ctx.APIError(http.StatusBadRequest, err.Error())
+			return
+		}
+
+		if errors.Is(err, util.ErrContentTooLarge) {
+			ctx.APIError(http.StatusRequestEntityTooLarge, err.Error())
+			return
+		}
+
+		ctx.APIErrorInternal(err)
 		return
 	}
 
-	ctx.JSON(http.StatusCreated, attach.APIFormat())
+	ctx.JSON(http.StatusCreated, convert.ToAPIAttachment(ctx, ctx.Repo.Repository, attach))
 }
 
 // EditReleaseAttachment updates the given attachment
-func EditReleaseAttachment(ctx *context.APIContext, form api.EditAttachmentOptions) {
+func EditReleaseAttachment(ctx *context.APIContext) {
 	// swagger:operation PATCH /repos/{owner}/{repo}/releases/{id}/assets/{attachment_id} repository repoEditReleaseAttachment
 	// ---
 	// summary: Edit a release attachment
@@ -246,18 +301,30 @@ func EditReleaseAttachment(ctx *context.APIContext, form api.EditAttachmentOptio
 	// responses:
 	//   "201":
 	//     "$ref": "#/responses/Attachment"
+	//   default:
+	//     "$ref": "#/responses/error"
+
+	form := web.GetForm[*api.EditAttachmentOptions](ctx)
 
 	// Check if release exists an load release
-	releaseID := ctx.ParamsInt64(":id")
-	attachID := ctx.ParamsInt64(":asset")
-	attach, err := models.GetAttachmentByID(attachID)
+	releaseID := ctx.PathParamInt64("id")
+	if !checkReleaseMatchRepo(ctx, releaseID) {
+		return
+	}
+
+	attachID := ctx.PathParamInt64("attachment_id")
+	attach, err := repo_model.GetAttachmentByID(ctx, attachID)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetAttachmentByID", err)
+		if repo_model.IsErrAttachmentNotExist(err) {
+			ctx.APIErrorNotFound()
+			return
+		}
+		ctx.APIErrorInternal(err)
 		return
 	}
 	if attach.ReleaseID != releaseID {
 		log.Info("User requested attachment is not in release, release_id %v, attachment_id: %v", releaseID, attachID)
-		ctx.NotFound()
+		ctx.APIErrorNotFound()
 		return
 	}
 	// FIXME Should prove the existence of the given repo, but results in unnecessary database requests
@@ -265,10 +332,15 @@ func EditReleaseAttachment(ctx *context.APIContext, form api.EditAttachmentOptio
 		attach.Name = form.Name
 	}
 
-	if err := models.UpdateAttachment(attach); err != nil {
-		ctx.Error(http.StatusInternalServerError, "UpdateAttachment", attach)
+	if err := attachment_service.UpdateAttachment(ctx, setting.Repository.Release.AllowedTypes, attach); err != nil {
+		if upload.IsErrFileTypeForbidden(err) {
+			ctx.APIError(http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		ctx.APIErrorInternal(err)
+		return
 	}
-	ctx.JSON(http.StatusCreated, attach.APIFormat())
+	ctx.JSON(http.StatusCreated, convert.ToAPIAttachment(ctx, ctx.Repo.Repository, attach))
 }
 
 // DeleteReleaseAttachment delete a given attachment
@@ -304,24 +376,33 @@ func DeleteReleaseAttachment(ctx *context.APIContext) {
 	// responses:
 	//   "204":
 	//     "$ref": "#/responses/empty"
+	//   default:
+	//     "$ref": "#/responses/error"
 
 	// Check if release exists an load release
-	releaseID := ctx.ParamsInt64(":id")
-	attachID := ctx.ParamsInt64(":asset")
-	attach, err := models.GetAttachmentByID(attachID)
+	releaseID := ctx.PathParamInt64("id")
+	if !checkReleaseMatchRepo(ctx, releaseID) {
+		return
+	}
+
+	attachID := ctx.PathParamInt64("attachment_id")
+	attach, err := repo_model.GetAttachmentByID(ctx, attachID)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetAttachmentByID", err)
+		if repo_model.IsErrAttachmentNotExist(err) {
+			ctx.APIErrorNotFound()
+			return
+		}
+		ctx.APIErrorInternal(err)
 		return
 	}
 	if attach.ReleaseID != releaseID {
 		log.Info("User requested attachment is not in release, release_id %v, attachment_id: %v", releaseID, attachID)
-		ctx.NotFound()
+		ctx.APIErrorNotFound()
 		return
 	}
-	// FIXME Should prove the existence of the given repo, but results in unnecessary database requests
 
-	if err := models.DeleteAttachment(attach, true); err != nil {
-		ctx.Error(http.StatusInternalServerError, "DeleteAttachment", err)
+	if err := repo_model.DeleteAttachment(ctx, attach, true); err != nil {
+		ctx.APIErrorInternal(err)
 		return
 	}
 	ctx.Status(http.StatusNoContent)

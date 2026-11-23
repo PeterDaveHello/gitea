@@ -1,34 +1,37 @@
 // Copyright 2015 The Gogs Authors. All rights reserved.
 // Copyright 2020 The Gitea Authors.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package user
 
 import (
 	"net/http"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/convert"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/routers/api/v1/utils"
+	user_model "gitea.dev/models/user"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/routers/api/v1/utils"
+	"gitea.dev/services/context"
+	"gitea.dev/services/convert"
 )
 
-func responseAPIUsers(ctx *context.APIContext, users []*models.User) {
+func responseAPIUsers(ctx *context.APIContext, users []*user_model.User) {
 	apiUsers := make([]*api.User, len(users))
 	for i := range users {
-		apiUsers[i] = convert.ToUser(users[i], ctx.IsSigned, ctx.User != nil && ctx.User.IsAdmin)
+		apiUsers[i] = convert.ToUser(ctx, users[i], ctx.Doer)
 	}
 	ctx.JSON(http.StatusOK, &apiUsers)
 }
 
-func listUserFollowers(ctx *context.APIContext, u *models.User) {
-	users, err := u.GetFollowers(utils.GetListOptions(ctx))
+func listUserFollowers(ctx *context.APIContext, u *user_model.User) {
+	listOptions := utils.GetListOptions(ctx)
+	users, count, err := user_model.GetUserFollowers(ctx, u, ctx.Doer, listOptions)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetUserFollowers", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
+
+	ctx.SetLinkHeader(count, listOptions.PageSize)
+	ctx.SetTotalCountHeader(count)
 	responseAPIUsers(ctx, users)
 }
 
@@ -52,7 +55,7 @@ func ListMyFollowers(ctx *context.APIContext) {
 	//   "200":
 	//     "$ref": "#/responses/UserList"
 
-	listUserFollowers(ctx, ctx.User)
+	listUserFollowers(ctx, ctx.Doer)
 }
 
 // ListFollowers list the given user's followers
@@ -65,7 +68,7 @@ func ListFollowers(ctx *context.APIContext) {
 	// parameters:
 	// - name: username
 	//   in: path
-	//   description: username of user
+	//   description: username of the user whose followers are to be listed
 	//   type: string
 	//   required: true
 	// - name: page
@@ -79,20 +82,22 @@ func ListFollowers(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/UserList"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	u := GetUserByParams(ctx)
-	if ctx.Written() {
-		return
-	}
-	listUserFollowers(ctx, u)
+	listUserFollowers(ctx, ctx.ContextUser)
 }
 
-func listUserFollowing(ctx *context.APIContext, u *models.User) {
-	users, err := u.GetFollowing(utils.GetListOptions(ctx))
+func listUserFollowing(ctx *context.APIContext, u *user_model.User) {
+	listOptions := utils.GetListOptions(ctx)
+	users, count, err := user_model.GetUserFollowing(ctx, u, ctx.Doer, listOptions)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetFollowing", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
+
+	ctx.SetLinkHeader(count, listOptions.PageSize)
+	ctx.SetTotalCountHeader(count)
 	responseAPIUsers(ctx, users)
 }
 
@@ -116,7 +121,7 @@ func ListMyFollowing(ctx *context.APIContext) {
 	//   "200":
 	//     "$ref": "#/responses/UserList"
 
-	listUserFollowing(ctx, ctx.User)
+	listUserFollowing(ctx, ctx.Doer)
 }
 
 // ListFollowing list the users that the given user is following
@@ -129,7 +134,7 @@ func ListFollowing(ctx *context.APIContext) {
 	// parameters:
 	// - name: username
 	//   in: path
-	//   description: username of user
+	//   description: username of the user whose followed users are to be listed
 	//   type: string
 	//   required: true
 	// - name: page
@@ -143,19 +148,17 @@ func ListFollowing(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/UserList"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	u := GetUserByParams(ctx)
-	if ctx.Written() {
-		return
-	}
-	listUserFollowing(ctx, u)
+	listUserFollowing(ctx, ctx.ContextUser)
 }
 
-func checkUserFollowing(ctx *context.APIContext, u *models.User, followID int64) {
-	if u.IsFollowing(followID) {
+func checkUserFollowing(ctx *context.APIContext, u *user_model.User, followID int64) {
+	if user_model.IsFollowing(ctx, u.ID, followID) {
 		ctx.Status(http.StatusNoContent)
 	} else {
-		ctx.NotFound()
+		ctx.APIErrorNotFound()
 	}
 }
 
@@ -167,56 +170,47 @@ func CheckMyFollowing(ctx *context.APIContext) {
 	// parameters:
 	// - name: username
 	//   in: path
-	//   description: username of followed user
+	//   description: username of the user to check for authenticated followers
 	//   type: string
 	//   required: true
 	// responses:
 	//   "204":
 	//     "$ref": "#/responses/empty"
-	//   "404":
-	//     "$ref": "#/responses/notFound"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	target := GetUserByParams(ctx)
-	if ctx.Written() {
-		return
-	}
-	checkUserFollowing(ctx, ctx.User, target.ID)
+	checkUserFollowing(ctx, ctx.Doer, ctx.ContextUser.ID)
 }
 
 // CheckFollowing check if one user is following another user
 func CheckFollowing(ctx *context.APIContext) {
-	// swagger:operation GET /users/{follower}/following/{followee} user userCheckFollowing
+	// swagger:operation GET /users/{username}/following/{target} user userCheckFollowing
 	// ---
 	// summary: Check if one user is following another user
 	// parameters:
-	// - name: follower
+	// - name: username
 	//   in: path
-	//   description: username of following user
+	//   description: username of the following user
 	//   type: string
 	//   required: true
-	// - name: followee
+	// - name: target
 	//   in: path
-	//   description: username of followed user
+	//   description: username of the followed user
 	//   type: string
 	//   required: true
 	// responses:
 	//   "204":
 	//     "$ref": "#/responses/empty"
-	//   "404":
-	//     "$ref": "#/responses/notFound"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	u := GetUserByParams(ctx)
+	target := GetUserByPathParam(ctx, "target") // FIXME: it is not right to call this function, it should load the "target" directly
 	if ctx.Written() {
 		return
 	}
-	target := GetUserByParamsName(ctx, ":target")
-	if ctx.Written() {
-		return
-	}
-	checkUserFollowing(ctx, u, target.ID)
+	checkUserFollowing(ctx, ctx.ContextUser, target.ID)
 }
 
-// Follow follow a user
 func Follow(ctx *context.APIContext) {
 	// swagger:operation PUT /user/following/{username} user userCurrentPutFollow
 	// ---
@@ -224,25 +218,22 @@ func Follow(ctx *context.APIContext) {
 	// parameters:
 	// - name: username
 	//   in: path
-	//   description: username of user to follow
+	//   description: username of the user to follow
 	//   type: string
 	//   required: true
 	// responses:
 	//   "204":
 	//     "$ref": "#/responses/empty"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	target := GetUserByParams(ctx)
-	if ctx.Written() {
-		return
-	}
-	if err := models.FollowUser(ctx.User.ID, target.ID); err != nil {
-		ctx.Error(http.StatusInternalServerError, "FollowUser", err)
+	if err := user_model.FollowUser(ctx, ctx.Doer, ctx.ContextUser); err != nil {
+		ctx.APIErrorAuto(err)
 		return
 	}
 	ctx.Status(http.StatusNoContent)
 }
 
-// Unfollow unfollow a user
 func Unfollow(ctx *context.APIContext) {
 	// swagger:operation DELETE /user/following/{username} user userCurrentDeleteFollow
 	// ---
@@ -250,19 +241,17 @@ func Unfollow(ctx *context.APIContext) {
 	// parameters:
 	// - name: username
 	//   in: path
-	//   description: username of user to unfollow
+	//   description: username of the user to unfollow
 	//   type: string
 	//   required: true
 	// responses:
 	//   "204":
 	//     "$ref": "#/responses/empty"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	target := GetUserByParams(ctx)
-	if ctx.Written() {
-		return
-	}
-	if err := models.UnfollowUser(ctx.User.ID, target.ID); err != nil {
-		ctx.Error(http.StatusInternalServerError, "UnfollowUser", err)
+	if err := user_model.UnfollowUser(ctx, ctx.Doer.ID, ctx.ContextUser.ID); err != nil {
+		ctx.APIErrorAuto(err)
 		return
 	}
 	ctx.Status(http.StatusNoContent)

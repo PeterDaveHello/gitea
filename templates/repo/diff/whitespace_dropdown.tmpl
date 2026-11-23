@@ -1,23 +1,22 @@
-<div class="ui dropdown tiny button">
-	{{.i18n.Tr "repo.diff.whitespace_button"}}
-	<i class="dropdown icon"></i>
+<div class="ui dropdown tiny basic button" data-tooltip-content="{{ctx.Locale.Tr "repo.diff.whitespace_button"}}">
+	{{svg "gitea-whitespace"}}
 	<div class="menu">
-		<a class="item" href="?style={{if .IsSplitStyle}}split{{else}}unified{{end}}&whitespace=">
-			<i class="circle {{ if eq .WhitespaceBehavior "" }}dot{{else}}outline{{end}} icon"></i>
-			{{.i18n.Tr "repo.diff.whitespace_show_everything"}}
+		<a class="item" href="?style={{if .IsSplitStyle}}split{{else}}unified{{end}}&whitespace=show-all&show-outdated={{$.ShowOutdatedComments}}" aria-current="{{eq .WhitespaceBehavior "show-all"}}">
+			{{svg "octicon-check" 16 (Iif (eq .WhitespaceBehavior "show-all") "" "tw-invisible")}}
+			{{ctx.Locale.Tr "repo.diff.whitespace_show_everything"}}
 		</a>
-		<a class="item" href="?style={{if .IsSplitStyle}}split{{else}}unified{{end}}&whitespace=ignore-all">
-			<i class="circle {{ if eq .WhitespaceBehavior "ignore-all" }}dot{{else}}outline{{end}} icon"></i>
-			{{.i18n.Tr "repo.diff.whitespace_ignore_all_whitespace"}}
+		<a class="item" href="?style={{if .IsSplitStyle}}split{{else}}unified{{end}}&whitespace=ignore-all&show-outdated={{$.ShowOutdatedComments}}" aria-current="{{eq .WhitespaceBehavior "ignore-all"}}">
+			{{svg "octicon-check" 16 (Iif (eq .WhitespaceBehavior "ignore-all") "" "tw-invisible")}}
+			{{ctx.Locale.Tr "repo.diff.whitespace_ignore_all_whitespace"}}
 		</a>
-		<a class="item" href="?style={{if .IsSplitStyle}}split{{else}}unified{{end}}&whitespace=ignore-change">
-			<i class="circle {{ if eq .WhitespaceBehavior "ignore-change" }}dot{{else}}outline{{end}} icon"></i>
-			{{.i18n.Tr "repo.diff.whitespace_ignore_amount_changes"}}
+		<a class="item" href="?style={{if .IsSplitStyle}}split{{else}}unified{{end}}&whitespace=ignore-change&show-outdated={{$.ShowOutdatedComments}}" aria-current="{{eq .WhitespaceBehavior "ignore-change"}}">
+			{{svg "octicon-check" 16 (Iif (eq .WhitespaceBehavior "ignore-change") "" "tw-invisible")}}
+			{{ctx.Locale.Tr "repo.diff.whitespace_ignore_amount_changes"}}
 		</a>
-		<a class="item" href="?style={{if .IsSplitStyle}}split{{else}}unified{{end}}&whitespace=ignore-eol">
-			<i class="circle {{ if eq .WhitespaceBehavior "ignore-eol" }}dot{{else}}outline{{end}} icon"></i>
-			{{.i18n.Tr "repo.diff.whitespace_ignore_at_eol"}}
+		<a class="item" href="?style={{if .IsSplitStyle}}split{{else}}unified{{end}}&whitespace=ignore-eol&show-outdated={{$.ShowOutdatedComments}}" aria-current="{{eq .WhitespaceBehavior "ignore-eol"}}">
+			{{svg "octicon-check" 16 (Iif (eq .WhitespaceBehavior "ignore-eol") "" "tw-invisible")}}
+			{{ctx.Locale.Tr "repo.diff.whitespace_ignore_at_eol"}}
 		</a>
 	</div>
 </div>
-<a class="ui tiny basic toggle button" href="?style={{if .IsSplitStyle}}unified{{else}}split{{end}}&whitespace={{$.WhitespaceBehavior}}">{{ if .IsSplitStyle }}{{.i18n.Tr "repo.diff.show_unified_view"}}{{else}}{{.i18n.Tr "repo.diff.show_split_view"}}{{end}}</a>
+<a class="ui tiny basic button" href="?style={{if .IsSplitStyle}}unified{{else}}split{{end}}&whitespace={{$.WhitespaceBehavior}}&show-outdated={{$.ShowOutdatedComments}}" data-tooltip-content="{{if .IsSplitStyle}}{{ctx.Locale.Tr "repo.diff.show_unified_view"}}{{else}}{{ctx.Locale.Tr "repo.diff.show_split_view"}}{{end}}">{{svg (Iif .IsSplitStyle "gitea-join" "gitea-split")}}</a>

@@ -1,0 +1,123 @@
+// Copyright 2021 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
+package repo
+
+import (
+	"context"
+	"time"
+
+	"gitea.dev/models/db"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/timeutil"
+	"gitea.dev/modules/util"
+
+	"xorm.io/builder"
+)
+
+// PushMirror represents mirror information of a repository.
+type PushMirror struct {
+	ID            int64       `xorm:"pk autoincr"`
+	RepoID        int64       `xorm:"INDEX"`
+	Repo          *Repository `xorm:"-"`
+	RemoteName    string
+	RemoteAddress string `xorm:"VARCHAR(2048)"`
+
+	SyncOnCommit   bool `xorm:"NOT NULL DEFAULT true"`
+	Interval       time.Duration
+	CreatedUnix    timeutil.TimeStamp `xorm:"created"`
+	LastUpdateUnix timeutil.TimeStamp `xorm:"INDEX last_update"`
+	LastError      string             `xorm:"text"`
+}
+
+func init() {
+	db.RegisterModel(new(PushMirror))
+}
+
+// GetRepository returns the path of the repository.
+func (m *PushMirror) GetRepository(ctx context.Context) *Repository {
+	if m.Repo != nil {
+		return m.Repo
+	}
+	var err error
+	m.Repo, err = GetRepositoryByID(ctx, m.RepoID)
+	if err != nil {
+		log.Error("getRepositoryByID[%d]: %v", m.ID, err)
+	}
+	return m.Repo
+}
+
+// GetRemoteName returns the name of the remote.
+func (m *PushMirror) GetRemoteName() string {
+	return m.RemoteName
+}
+
+// UpdatePushMirrorSyncStatus updates the sync status (last update time and last error) of the push-mirror
+func UpdatePushMirrorSyncStatus(ctx context.Context, m *PushMirror) error {
+	_, err := db.GetEngine(ctx).ID(m.ID).Cols("last_update", "last_error").Update(m)
+	return err
+}
+
+// UpdatePushMirrorInterval updates the sync interval of the push-mirror
+func UpdatePushMirrorInterval(ctx context.Context, m *PushMirror) error {
+	_, err := db.GetEngine(ctx).ID(m.ID).Cols("interval").Update(m)
+	return err
+}
+
+func GetRepoPushMirrorByRemoteName(ctx context.Context, repoID int64, name string) (*PushMirror, error) {
+	var m PushMirror
+	has, err := db.GetEngine(ctx).Where(builder.Eq{"repo_id": repoID, "remote_name": name}).Get(&m)
+	if err != nil {
+		return nil, err
+	} else if !has {
+		return nil, util.NewNotExistErrorf("PushMirror does not exist [repo_id: %d, remote_name: %s]", repoID, name)
+	}
+	return &m, nil
+}
+
+func DeleteRepoPushMirrorByID(ctx context.Context, repoID, mirrorID int64) error {
+	_, err := db.GetEngine(ctx).Where("id = ?", mirrorID).And("repo_id = ?", repoID).Delete(new(PushMirror))
+	return err
+}
+
+// GetPushMirrorsByRepoID returns push-mirror information of a repository.
+func GetPushMirrorsByRepoID(ctx context.Context, repoID int64, listOptions db.ListOptions) (mirrors []*PushMirror, count int64, err error) {
+	sess := db.GetEngine(ctx).Where("repo_id = ?", repoID).OrderBy("id")
+	if !listOptions.IsListAll() && listOptions.PageSize > 0 && listOptions.Page >= 1 {
+		sess.Limit(listOptions.PageSize, (listOptions.Page-1)*listOptions.PageSize)
+	}
+	count, err = sess.FindAndCount(&mirrors)
+	return mirrors, count, err
+}
+
+func GetPushMirrorByRepoID(ctx context.Context, repoID, id int64) (*PushMirror, error) {
+	var pushMirror PushMirror
+	has, err := db.GetEngine(ctx).Where("id = ?", id).And("repo_id = ?", repoID).Get(&pushMirror)
+	if err != nil {
+		return nil, err
+	} else if !has {
+		return nil, util.NewNotExistErrorf("PushMirror does not exist [repo_id: %d, mirror: %d]", repoID, id)
+	}
+	return &pushMirror, nil
+}
+
+// GetPushMirrorsSyncedOnCommit returns push-mirrors for this repo that should be updated by new commits
+func GetPushMirrorsSyncedOnCommit(ctx context.Context, repoID int64) (mirrors []*PushMirror, err error) {
+	err = db.GetEngine(ctx).Where("repo_id = ? AND sync_on_commit = ?", repoID, true).OrderBy("id").Find(&mirrors)
+	return mirrors, err
+}
+
+// PushMirrorsIterate iterates all push-mirror repositories.
+func PushMirrorsIterate(ctx context.Context, limit int, f func(idx int, bean any) error) error {
+	sess := db.GetEngine(ctx).
+		Table("push_mirror").
+		Join("INNER", "`repository`", "`repository`.id = `push_mirror`.repo_id").
+		Where("`push_mirror`.last_update + (`push_mirror`.`interval` / ?) <= ?", time.Second, time.Now().Unix()).
+		And("`push_mirror`.`interval` != 0").
+		And("`repository`.is_archived = ?", false).
+		OrderBy("last_update ASC")
+	if limit > 0 {
+		sess = sess.Limit(limit)
+	}
+	return sess.Iterate(new(PushMirror), f)
+}

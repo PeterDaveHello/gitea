@@ -1,6 +1,5 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package repo
 
@@ -8,21 +7,22 @@ import (
 	"net/http"
 	"testing"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/context"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/modules/test"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/models/unittest"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/modules/web"
+	"gitea.dev/services/contexttest"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestRepoEdit(t *testing.T) {
-	models.PrepareTestEnv(t)
+	unittest.PrepareTestEnv(t)
 
-	ctx := test.MockContext(t, "user2/repo1")
-	test.LoadRepo(t, ctx, 1)
-	test.LoadUser(t, ctx, 2)
-	ctx.Repo.Owner = ctx.User
+	ctx, _ := contexttest.MockAPIContext(t, "user2/repo1")
+	contexttest.LoadRepo(t, ctx, 1)
+	contexttest.LoadUser(t, ctx, 2)
+	ctx.Repo.Owner = ctx.Doer
 	description := "new description"
 	website := "http://wwww.newwebsite.com"
 	private := true
@@ -35,6 +35,7 @@ func TestRepoEdit(t *testing.T) {
 	allowRebase := false
 	allowRebaseMerge := false
 	allowSquashMerge := false
+	allowFastForwardOnlyMerge := false
 	archived := true
 	opts := api.EditRepoOption{
 		Name:                      &ctx.Repo.Repository.Name,
@@ -50,33 +51,36 @@ func TestRepoEdit(t *testing.T) {
 		AllowRebase:               &allowRebase,
 		AllowRebaseMerge:          &allowRebaseMerge,
 		AllowSquash:               &allowSquashMerge,
+		AllowFastForwardOnly:      &allowFastForwardOnlyMerge,
 		Archived:                  &archived,
 	}
 
-	Edit(&context.APIContext{Context: ctx, Org: nil}, opts)
+	web.SetForm(ctx, &opts)
+	Edit(ctx)
 
-	assert.EqualValues(t, http.StatusOK, ctx.Resp.Status())
-	models.AssertExistsAndLoadBean(t, &models.Repository{
+	assert.Equal(t, http.StatusOK, ctx.Resp.WrittenStatus())
+	unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{
 		ID: 1,
-	}, models.Cond("name = ? AND is_archived = 1", *opts.Name))
+	}, unittest.Cond("name = ? AND is_archived = 1", *opts.Name))
 }
 
 func TestRepoEditNameChange(t *testing.T) {
-	models.PrepareTestEnv(t)
+	unittest.PrepareTestEnv(t)
 
-	ctx := test.MockContext(t, "user2/repo1")
-	test.LoadRepo(t, ctx, 1)
-	test.LoadUser(t, ctx, 2)
-	ctx.Repo.Owner = ctx.User
+	ctx, _ := contexttest.MockAPIContext(t, "user2/repo1")
+	contexttest.LoadRepo(t, ctx, 1)
+	contexttest.LoadUser(t, ctx, 2)
+	ctx.Repo.Owner = ctx.Doer
 	name := "newname"
 	opts := api.EditRepoOption{
 		Name: &name,
 	}
 
-	Edit(&context.APIContext{Context: ctx, Org: nil}, opts)
-	assert.EqualValues(t, http.StatusOK, ctx.Resp.Status())
+	web.SetForm(ctx, &opts)
+	Edit(ctx)
+	assert.Equal(t, http.StatusOK, ctx.Resp.WrittenStatus())
 
-	models.AssertExistsAndLoadBean(t, &models.Repository{
+	unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{
 		ID: 1,
-	}, models.Cond("name = ?", opts.Name))
+	}, unittest.Cond("name = ?", opts.Name))
 }

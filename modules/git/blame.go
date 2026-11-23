@@ -1,73 +1,128 @@
-// Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// Copyright 2025 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
 
 package git
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
-	"regexp"
+	"strings"
 
-	"code.gitea.io/gitea/modules/process"
+	"gitea.dev/modules/git/gitcmd"
+	"gitea.dev/modules/setting"
 )
+
+func LineBlameCommitID(ctx context.Context, repo RepositoryFacade, revision, file string, line uint) (string, error) {
+	stdout, _, err := gitcmd.NewCommand("blame").WithRepo(repo).
+		AddOptionFormat("-L %d,%d", line, line).
+		AddOptionValues("-p", revision).
+		AddDashesAndList(file).
+		RunStdString(ctx)
+	if err != nil {
+		return "", err
+	}
+	commitID, _, _ := strings.Cut(stdout, " ")
+	if !IsStringValidObjectID(nil, commitID) {
+		return "", fmt.Errorf("LineBlameCommitID: invalid commit ID %q", commitID)
+	}
+	return commitID, nil
+}
 
 // BlamePart represents block of blame - continuous lines with one sha
 type BlamePart struct {
-	Sha   string
-	Lines []string
+	Sha          string
+	Lines        []string
+	PreviousSha  string
+	PreviousPath string
 }
 
 // BlameReader returns part of file blame one by one
 type BlameReader struct {
-	cmd     *exec.Cmd
-	pid     int64
-	output  io.ReadCloser
-	scanner *bufio.Scanner
-	lastSha *string
-	cancel  context.CancelFunc
+	bufferedReader *bufio.Reader
+	done           chan error
+	lastSha        *string
+	ignoreRevsFile string
+	objectFormat   ObjectFormat
+	cleanupFuncs   []func()
 }
 
-var shaLineRegex = regexp.MustCompile("^([a-z0-9]{40})")
+func (r *BlameReader) UsesIgnoreRevs() bool {
+	return r.ignoreRevsFile != ""
+}
 
-// NextPart returns next part of blame (sequencial code lines with the same commit)
+// NextPart returns next part of blame (sequential code lines with the same commit)
 func (r *BlameReader) NextPart() (*BlamePart, error) {
 	var blamePart *BlamePart
 
-	scanner := r.scanner
-
 	if r.lastSha != nil {
-		blamePart = &BlamePart{*r.lastSha, make([]string, 0)}
+		blamePart = &BlamePart{
+			Sha:   *r.lastSha,
+			Lines: make([]string, 0),
+		}
 	}
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	const previousHeader = "previous "
+	var lineBytes []byte
+	var isPrefix bool
+	var err error
 
-		// Skip empty lines
-		if len(line) == 0 {
+	for err != io.EOF {
+		lineBytes, isPrefix, err = r.bufferedReader.ReadLine()
+		if err != nil && err != io.EOF {
+			return blamePart, err
+		}
+
+		if len(lineBytes) == 0 {
+			// isPrefix will be false
 			continue
 		}
 
-		lines := shaLineRegex.FindStringSubmatch(line)
-		if lines != nil {
-			sha1 := lines[1]
+		var objectID string
+		if lineField1, _, ok := bytes.Cut(lineBytes, []byte(" ")); ok {
+			lineFieldStr := string(lineField1)
+			if IsStringValidObjectID(r.objectFormat, lineFieldStr) {
+				objectID = lineFieldStr
+			}
+		}
 
+		if objectID != "" {
 			if blamePart == nil {
-				blamePart = &BlamePart{sha1, make([]string, 0)}
+				blamePart = &BlamePart{
+					Sha:   objectID,
+					Lines: make([]string, 0),
+				}
 			}
 
-			if blamePart.Sha != sha1 {
-				r.lastSha = &sha1
+			if blamePart.Sha != objectID {
+				r.lastSha = &objectID
+				// need to munch to end of line...
+				for isPrefix {
+					_, isPrefix, err = r.bufferedReader.ReadLine()
+					if err != nil && err != io.EOF {
+						return blamePart, err
+					}
+				}
 				return blamePart, nil
 			}
-		} else if line[0] == '\t' {
-			code := line[1:]
+		} else if lineBytes[0] == '\t' {
+			blamePart.Lines = append(blamePart.Lines, string(lineBytes[1:]))
+		} else if bytes.HasPrefix(lineBytes, []byte(previousHeader)) {
+			objectFormatLength := r.objectFormat.FullLength()
+			offset := len(previousHeader) // already includes a space
+			blamePart.PreviousSha = string(lineBytes[offset : offset+objectFormatLength])
+			offset += objectFormatLength + 1 // +1 for space
+			blamePart.PreviousPath = string(lineBytes[offset:])
+		}
 
-			blamePart.Lines = append(blamePart.Lines, code)
+		// need to munch to end of line...
+		for isPrefix {
+			_, isPrefix, err = r.bufferedReader.ReadLine()
+			if err != nil && err != io.EOF {
+				return blamePart, err
+			}
 		}
 	}
 
@@ -78,57 +133,87 @@ func (r *BlameReader) NextPart() (*BlamePart, error) {
 
 // Close BlameReader - don't run NextPart after invoking that
 func (r *BlameReader) Close() error {
-	defer process.GetManager().Remove(r.pid)
-	r.cancel()
-
-	_ = r.output.Close()
-
-	if err := r.cmd.Wait(); err != nil {
-		return fmt.Errorf("Wait: %v", err)
+	if r.bufferedReader == nil {
+		return nil
 	}
 
-	return nil
+	err := <-r.done
+	r.bufferedReader = nil
+	r.cleanup()
+	return err
 }
 
-// CreateBlameReader creates reader for given repository, commit and file
-func CreateBlameReader(ctx context.Context, repoPath, commitID, file string) (*BlameReader, error) {
-	gitRepo, err := OpenRepository(repoPath)
-	if err != nil {
-		return nil, err
+func (r *BlameReader) cleanup() {
+	for _, cleanup := range r.cleanupFuncs {
+		cleanup()
 	}
-	gitRepo.Close()
-
-	return createBlameReader(ctx, repoPath, GitExecutable, "blame", commitID, "--porcelain", "--", file)
 }
 
-func createBlameReader(ctx context.Context, dir string, command ...string) (*BlameReader, error) {
-	// Here we use the provided context - this should be tied to the request performing the blame so that it does not hang around.
-	ctx, cancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
-	cmd.Dir = dir
-	cmd.Stderr = os.Stderr
+// CreateBlameReader creates reader for given git.RepositoryFacade, commit and file
+func CreateBlameReader(ctx context.Context, objectFormat ObjectFormat, repo RepositoryFacade, gitRepo *Repository, commit *Commit, file string, bypassBlameIgnore bool) (rd *BlameReader, retErr error) {
+	defer func() {
+		if retErr != nil {
+			rd.cleanup()
+		}
+	}()
 
-	stdout, err := cmd.StdoutPipe()
+	rd = &BlameReader{
+		done:         make(chan error, 1),
+		objectFormat: objectFormat,
+	}
+
+	cmd := gitcmd.NewCommand("blame", "--porcelain")
+
+	stdoutReader, stdoutReaderClose := cmd.MakeStdoutPipe()
+	rd.bufferedReader = bufio.NewReader(stdoutReader)
+	rd.cleanupFuncs = append(rd.cleanupFuncs, stdoutReaderClose)
+
+	if !bypassBlameIgnore {
+		ignoreRevsFileName, ignoreRevsFileCleanup, err := tryCreateBlameIgnoreRevsFile(ctx, gitRepo, commit)
+		if err != nil && !IsErrNotExist(err) {
+			return nil, err
+		} else if err == nil {
+			rd.ignoreRevsFile = ignoreRevsFileName
+			rd.cleanupFuncs = append(rd.cleanupFuncs, ignoreRevsFileCleanup)
+			// Possible improvement: use --ignore-revs-file /dev/stdin on unix
+			// There is no equivalent on Windows. May be implemented if Gitea uses an external git backend.
+			cmd.AddOptionValues("--ignore-revs-file", ignoreRevsFileName)
+		}
+	}
+
+	cmd.AddDynamicArguments(commit.ID.String()).AddDashesAndList(file)
+
+	go func() {
+		// TODO: it doesn't work for directories (the directories shouldn't be "blamed"), and the "err" should be returned by "Read" but not by "Close"
+		rd.done <- cmd.WithRepo(repo).RunWithStderr(ctx)
+	}()
+
+	return rd, nil
+}
+
+func tryCreateBlameIgnoreRevsFile(ctx context.Context, gitRepo *Repository, commit *Commit) (string, func(), error) {
+	entry, err := commit.GetTreeEntryByPath(ctx, gitRepo, ".git-blame-ignore-revs")
 	if err != nil {
-		defer cancel()
-		return nil, fmt.Errorf("StdoutPipe: %v", err)
+		return "", nil, err
 	}
 
-	if err = cmd.Start(); err != nil {
-		defer cancel()
-		return nil, fmt.Errorf("Start: %v", err)
+	r, err := entry.Blob(gitRepo).DataAsync(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	defer r.Close()
+
+	f, cleanup, err := setting.AppDataTempDir("git-repo-content").CreateTempFileRandom("git-blame-ignore-revs")
+	if err != nil {
+		return "", nil, err
+	}
+	filename := f.Name()
+	_, err = io.Copy(f, r)
+	_ = f.Close()
+	if err != nil {
+		cleanup()
+		return "", nil, err
 	}
 
-	pid := process.GetManager().Add(fmt.Sprintf("GetBlame [repo_path: %s]", dir), cancel)
-
-	scanner := bufio.NewScanner(stdout)
-
-	return &BlameReader{
-		cmd,
-		pid,
-		stdout,
-		scanner,
-		nil,
-		cancel,
-	}, nil
+	return filename, cleanup, nil
 }

@@ -1,89 +1,369 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package repository
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"strings"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/notification"
-	repo_module "code.gitea.io/gitea/modules/repository"
-	pull_service "code.gitea.io/gitea/services/pull"
+	activities_model "gitea.dev/models/activities"
+	audit_model "gitea.dev/models/audit"
+	"gitea.dev/models/db"
+	issues_model "gitea.dev/models/issues"
+	"gitea.dev/models/organization"
+	access_model "gitea.dev/models/perm/access"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/models/unit"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/commitstatus"
+	"gitea.dev/modules/git"
+	"gitea.dev/modules/git/gitrepo"
+	"gitea.dev/modules/graceful"
+	issue_indexer "gitea.dev/modules/indexer/issues"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/queue"
+	repo_module "gitea.dev/modules/repository"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/structs"
+	"gitea.dev/services/audit"
+	notify_service "gitea.dev/services/notify"
+	pull_service "gitea.dev/services/pull"
 )
 
-// CreateRepository creates a repository for the user/organization.
-func CreateRepository(doer, owner *models.User, opts models.CreateRepoOptions) (*models.Repository, error) {
-	repo, err := repo_module.CreateRepository(doer, owner, opts)
-	if err != nil {
-		if repo != nil {
-			if errDelete := models.DeleteRepository(doer, owner.ID, repo.ID); errDelete != nil {
-				log.Error("Rollback deleteRepository: %v", errDelete)
-			}
-		}
-		return nil, err
-	}
-
-	notification.NotifyCreateRepository(doer, owner, repo)
-
-	return repo, nil
+// WebSearchCommitStatus is the latest commit status of a repository returned by web search
+type WebSearchCommitStatus struct {
+	State     commitstatus.CommitStatusState `json:"state"`
+	TargetURL string                         `json:"target_url"`
 }
 
-// ForkRepository forks a repository
-func ForkRepository(doer, u *models.User, oldRepo *models.Repository, name, desc string) (*models.Repository, error) {
-	repo, err := repo_module.ForkRepository(doer, u, oldRepo, name, desc)
+// WebSearchRepository represents a repository returned by web search
+type WebSearchRepository struct {
+	Repository               *structs.Repository    `json:"repository"`
+	LatestCommitStatus       *WebSearchCommitStatus `json:"latest_commit_status"`
+	LocaleLatestCommitStatus string                 `json:"locale_latest_commit_status"`
+}
+
+// WebSearchResults results of a successful web search
+type WebSearchResults struct {
+	OK   bool                   `json:"ok"`
+	Data []*WebSearchRepository `json:"data"`
+}
+
+// CreateRepository creates a repository for the user/organization.
+func CreateRepository(ctx context.Context, doer, owner *user_model.User, opts CreateRepoOptions) (*repo_model.Repository, error) {
+	repo, err := CreateRepositoryDirectly(ctx, doer, owner, opts, true)
 	if err != nil {
-		if repo != nil {
-			if errDelete := models.DeleteRepository(doer, u.ID, repo.ID); errDelete != nil {
-				log.Error("Rollback deleteRepository: %v", errDelete)
-			}
-		}
+		// No need to rollback here we should do this in CreateRepository...
 		return nil, err
 	}
 
-	notification.NotifyForkRepository(doer, oldRepo, repo)
+	notify_service.CreateRepository(ctx, doer, owner, repo)
 
 	return repo, nil
 }
 
 // DeleteRepository deletes a repository for a user or organization.
-func DeleteRepository(doer *models.User, repo *models.Repository) error {
-	if err := pull_service.CloseRepoBranchesPulls(doer, repo); err != nil {
+func DeleteRepository(ctx context.Context, doer *user_model.User, repo *repo_model.Repository, notify bool) error {
+	if err := pull_service.CloseRepoBranchesPulls(ctx, doer, repo); err != nil {
 		log.Error("CloseRepoBranchesPulls failed: %v", err)
 	}
 
-	if err := models.DeleteRepository(doer, repo.OwnerID, repo.ID); err != nil {
+	if notify {
+		// If the repo itself has webhooks, we need to trigger them before deleting it...
+		notify_service.DeleteRepository(ctx, doer, repo)
+	}
+
+	if err := DeleteRepositoryDirectly(ctx, repo.ID); err != nil {
 		return err
 	}
 
-	notification.NotifyDeleteRepository(doer, repo)
+	audit.Record(ctx, audit_model.RepositoryDelete, repo)
 
 	return nil
 }
 
 // PushCreateRepo creates a repository when a new repository is pushed to an appropriate namespace
-func PushCreateRepo(authUser, owner *models.User, repoName string) (*models.Repository, error) {
+func PushCreateRepo(ctx context.Context, authUser, owner *user_model.User, repoName string) (*repo_model.Repository, error) {
+	if authUser == nil {
+		return nil, errors.New("cannot push-create repository anonymously")
+	}
 	if !authUser.IsAdmin {
 		if owner.IsOrganization() {
-			if ok, err := owner.CanCreateOrgRepo(authUser.ID); err != nil {
+			if ok, err := organization.CanCreateOrgRepo(ctx, owner.ID, authUser.ID); err != nil {
 				return nil, err
 			} else if !ok {
-				return nil, fmt.Errorf("cannot push-create repository for org")
+				return nil, errors.New("cannot push-create repository for org")
 			}
 		} else if authUser.ID != owner.ID {
-			return nil, fmt.Errorf("cannot push-create repository for another user")
+			return nil, errors.New("cannot push-create repository for another user")
 		}
 	}
 
-	repo, err := CreateRepository(authUser, owner, models.CreateRepoOptions{
+	repo, err := CreateRepository(ctx, authUser, owner, CreateRepoOptions{
 		Name:      repoName,
-		IsPrivate: true,
+		IsPrivate: setting.Repository.DefaultPushCreatePrivate || setting.Repository.ForcePrivate,
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	return repo, nil
+}
+
+// Init start repository service
+func Init(ctx context.Context) error {
+	licenseUpdaterQueue = queue.CreateUniqueQueue(graceful.GetManager().ShutdownContext(), "repo_license_updater", repoLicenseUpdater)
+	if licenseUpdaterQueue == nil {
+		return errors.New("unable to create repo_license_updater queue")
+	}
+	go graceful.GetManager().RunWithCancel(licenseUpdaterQueue)
+
+	if err := repo_module.LoadRepoConfig(); err != nil {
+		return err
+	}
+	if err := initPushQueue(); err != nil {
+		return err
+	}
+	return initBranchSyncQueue(graceful.GetManager().ShutdownContext())
+}
+
+// UpdateRepository updates a repository
+func UpdateRepository(ctx context.Context, repo *repo_model.Repository, visibilityChanged bool) (err error) {
+	return db.WithTx(ctx, func(ctx context.Context) error {
+		if err = updateRepository(ctx, repo, visibilityChanged); err != nil {
+			return fmt.Errorf("updateRepository: %w", err)
+		}
+		return nil
+	})
+}
+
+func MakeRepoPrivate(ctx context.Context, repo *repo_model.Repository, private bool) (err error) {
+	if err := setRepoVisibility(ctx, repo, private); err != nil {
+		return err
+	}
+
+	audit.Record(ctx, audit_model.RepositoryVisibility, repo, "visibility", private)
+
+	return nil
+}
+
+func setRepoVisibility(ctx context.Context, repo *repo_model.Repository, private bool) (err error) {
+	return db.WithTx(ctx, func(ctx context.Context) error {
+		repo.IsPrivate = private
+		if err := repo_model.UpdateRepositoryColsNoAutoTime(ctx, repo, "is_private"); err != nil {
+			return err
+		}
+
+		if err = repo.LoadOwner(ctx); err != nil {
+			return fmt.Errorf("LoadOwner: %w", err)
+		}
+		if repo.Owner.IsOrganization() {
+			// Organization repository need to recalculate access table when visibility is changed.
+			if err = access_model.RecalculateTeamAccesses(ctx, repo, 0); err != nil {
+				return fmt.Errorf("recalculateTeamAccesses: %w", err)
+			}
+		}
+
+		// Create/Remove git-daemon-export-ok for git-daemon...
+		if err := CheckDaemonExportOK(ctx, repo); err != nil {
+			return err
+		}
+
+		// If repo has become private, we need to set its actions to private, and clear stars and watches.
+		if private {
+			_, err = db.GetEngine(ctx).
+				Where("repo_id = ?", repo.ID).Cols("is_private").Update(&activities_model.Action{IsPrivate: true})
+			if err != nil {
+				return err
+			}
+			if err = repo_model.ClearRepoStars(ctx, repo.ID); err != nil {
+				return err
+			}
+			if err = repo_model.ClearRepoWatches(ctx, repo.ID); err != nil {
+				return err
+			}
+		}
+
+		shouldUpdateForks := private
+		if !private && repo.Owner.Visibility != structs.VisibleTypePrivate {
+			shouldUpdateForks = true
+		}
+		if shouldUpdateForks {
+			forkRepos, err := repo_model.GetRepositoriesByForkID(ctx, repo.ID)
+			if err != nil {
+				return fmt.Errorf("getRepositoriesByForkID: %w", err)
+			}
+			for _, forkRepo := range forkRepos {
+				if err = setRepoVisibility(ctx, forkRepo, private); err != nil {
+					return fmt.Errorf("setRepoVisibility[%d]: %w", forkRepo.ID, err)
+				}
+			}
+		}
+
+		// If visibility is changed, we need to update the issue indexer.
+		// Since the data in the issue indexer have field to indicate if the repo is public or not.
+		issue_indexer.UpdateRepoIndexer(ctx, repo.ID)
+		return nil
+	})
+}
+
+// GetAttachmentLinkedTypeAndRepoID returns the linked type and repository id of attachment if any
+func GetAttachmentLinkedTypeAndRepoID(ctx context.Context, a *repo_model.Attachment) (unit.Type, int64, error) {
+	if a.IssueID != 0 {
+		iss, err := issues_model.GetIssueByID(ctx, a.IssueID)
+		if err != nil {
+			return unit.TypeIssues, 0, err
+		}
+		unitType := unit.TypeIssues
+		if iss.IsPull {
+			unitType = unit.TypePullRequests
+		}
+		return unitType, iss.RepoID, nil
+	}
+
+	if a.ReleaseID != 0 {
+		rel, err := repo_model.GetReleaseByID(ctx, a.ReleaseID)
+		if err != nil {
+			return unit.TypeReleases, 0, err
+		}
+		return unit.TypeReleases, rel.RepoID, nil
+	}
+	return unit.TypeInvalid, 0, nil
+}
+
+// CheckDaemonExportOK creates/removes git-daemon-export-ok for git-daemon...
+func CheckDaemonExportOK(ctx context.Context, repo *repo_model.Repository) error {
+	if err := repo.LoadOwner(ctx); err != nil {
+		return err
+	}
+
+	// Create/Remove git-daemon-export-ok for git-daemon...
+	daemonExportFile := `git-daemon-export-ok`
+	isExist, err := git.IsRepoFileExist(ctx, repo, daemonExportFile)
+	if err != nil {
+		log.Error("Unable to check if %s exists. Error: %v", daemonExportFile, err)
+		return err
+	}
+
+	isPublic := !repo.IsPrivate && repo.Owner.Visibility == structs.VisibleTypePublic
+	if !isPublic && isExist {
+		if err = git.RemoveRepoFileOrDir(ctx, repo, daemonExportFile); err != nil {
+			log.Error("Failed to remove %s: %v", daemonExportFile, err)
+		}
+	} else if isPublic && !isExist {
+		if f, err := git.CreateRepoFile(ctx, repo, daemonExportFile); err != nil {
+			log.Error("Failed to create %s: %v", daemonExportFile, err)
+		} else {
+			f.Close()
+		}
+	}
+
+	return nil
+}
+
+// updateRepository updates a repository with db context
+func updateRepository(ctx context.Context, repo *repo_model.Repository, visibilityChanged bool) (err error) {
+	repo.LowerName = strings.ToLower(repo.Name)
+
+	e := db.GetEngine(ctx)
+
+	if _, err = e.ID(repo.ID).NoAutoTime().AllCols().Omit("latest_release_id").Update(repo); err != nil { // the pin has its own writers, a stale snapshot must not revert it
+		return fmt.Errorf("update: %w", err)
+	}
+
+	if err = repo_module.UpdateRepoSize(ctx, repo); err != nil {
+		log.Error("Failed to update size for repository: %v", err)
+	}
+
+	if visibilityChanged {
+		if err = repo.LoadOwner(ctx); err != nil {
+			return fmt.Errorf("LoadOwner: %w", err)
+		}
+		if repo.Owner.IsOrganization() {
+			// Organization repository need to recalculate access table when visibility is changed.
+			if err = access_model.RecalculateTeamAccesses(ctx, repo, 0); err != nil {
+				return fmt.Errorf("recalculateTeamAccesses: %w", err)
+			}
+		}
+
+		// If repo has become private, we need to set its actions to private.
+		if repo.IsPrivate {
+			_, err = e.Where("repo_id = ?", repo.ID).Cols("is_private").Update(&activities_model.Action{
+				IsPrivate: true,
+			})
+			if err != nil {
+				return err
+			}
+
+			if err = repo_model.ClearRepoStars(ctx, repo.ID); err != nil {
+				return err
+			}
+
+			// watchers who lost access must not keep watching the now-private repo
+			if err = repo_model.ClearRepoWatches(ctx, repo.ID); err != nil {
+				return err
+			}
+		}
+
+		// Create/Remove git-daemon-export-ok for git-daemon...
+		if err := CheckDaemonExportOK(ctx, repo); err != nil {
+			return err
+		}
+
+		forkRepos, err := repo_model.GetRepositoriesByForkID(ctx, repo.ID)
+		if err != nil {
+			return fmt.Errorf("getRepositoriesByForkID: %w", err)
+		}
+		for i := range forkRepos {
+			forkRepos[i].IsPrivate = repo.IsPrivate || repo.Owner.Visibility == structs.VisibleTypePrivate
+			if err = updateRepository(ctx, forkRepos[i], true); err != nil {
+				return fmt.Errorf("updateRepository[%d]: %w", forkRepos[i].ID, err)
+			}
+		}
+
+		// If visibility is changed, we need to update the issue indexer.
+		// Since the data in the issue indexer have field to indicate if the repo is public or not.
+		issue_indexer.UpdateRepoIndexer(ctx, repo.ID)
+	}
+
+	return nil
+}
+
+func HasWiki(ctx context.Context, repo *repo_model.Repository) bool {
+	hasWiki, err := git.IsRepositoryExist(ctx, repo.WikiStorageRepo())
+	if err != nil {
+		log.Error("gitrepo.IsRepositoryExist: %v", err)
+	}
+	return hasWiki && err == nil
+}
+
+// CheckCreateRepository check if doer could create a repository in new owner
+func CheckCreateRepository(ctx context.Context, doer, owner *user_model.User, name string, overwriteOrAdopt bool) error {
+	if !doer.CanCreateRepoIn(owner) {
+		return repo_model.ErrReachLimitOfRepo{Limit: owner.MaxRepoCreation}
+	}
+
+	if err := repo_model.IsUsableRepoName(name); err != nil {
+		return err
+	}
+
+	has, err := repo_model.IsRepositoryModelExist(ctx, owner, name)
+	if err != nil {
+		return err
+	} else if has {
+		return repo_model.ErrRepoAlreadyExist{Uname: owner.Name, Name: name}
+	}
+	repo := gitrepo.CodeRepoByName(owner.Name, name)
+	isExist, err := git.IsRepositoryExist(ctx, repo)
+	if err != nil {
+		log.Error("Unable to check if repo %s/%s exists, error: %v", owner.Name, name, err)
+		return err
+	}
+	if !overwriteOrAdopt && isExist {
+		return repo_model.ErrRepoFilesAlreadyExist{Uname: owner.Name, Name: name}
+	}
+	return nil
 }

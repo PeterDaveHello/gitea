@@ -1,6 +1,5 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package notify
 
@@ -8,8 +7,12 @@ import (
 	"fmt"
 	"net/http"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/context"
+	activities_model "gitea.dev/models/activities"
+	"gitea.dev/models/db"
+	issues_model "gitea.dev/models/issues"
+	"gitea.dev/services/context"
+	"gitea.dev/services/convert"
+	"gitea.dev/services/notifications"
 )
 
 // GetThread get notification by ID
@@ -30,21 +33,19 @@ func GetThread(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/NotificationThread"
-	//   "403":
-	//     "$ref": "#/responses/forbidden"
-	//   "404":
-	//     "$ref": "#/responses/notFound"
+	//   default:
+	//     "$ref": "#/responses/error"
 
 	n := getThread(ctx)
 	if n == nil {
 		return
 	}
-	if err := n.LoadAttributes(); err != nil {
-		ctx.InternalServerError(err)
+	if err := n.LoadAttributes(ctx); err != nil && !issues_model.IsErrCommentNotExist(err) {
+		ctx.APIErrorInternal(err)
 		return
 	}
 
-	ctx.JSON(http.StatusOK, n.APIFormat())
+	ctx.JSON(http.StatusOK, convert.ToNotificationThread(ctx, n))
 }
 
 // ReadThread mark notification as read by ID
@@ -70,42 +71,44 @@ func ReadThread(ctx *context.APIContext) {
 	//   required: false
 	// responses:
 	//   "205":
-	//     "$ref": "#/responses/empty"
-	//   "403":
-	//     "$ref": "#/responses/forbidden"
-	//   "404":
-	//     "$ref": "#/responses/notFound"
+	//     "$ref": "#/responses/NotificationThread"
+	//   default:
+	//     "$ref": "#/responses/error"
 
 	n := getThread(ctx)
 	if n == nil {
 		return
 	}
 
-	targetStatus := statusStringToNotificationStatus(ctx.Query("to-status"))
+	targetStatus := statusStringToNotificationStatus(ctx.FormString("to-status"))
 	if targetStatus == 0 {
-		targetStatus = models.NotificationStatusRead
+		targetStatus = activities_model.NotificationStatusRead
 	}
 
-	err := models.SetNotificationStatus(n.ID, ctx.User, targetStatus)
+	notif, err := notifications.SetNotificationStatus(ctx, n.ID, ctx.Doer, targetStatus)
 	if err != nil {
-		ctx.InternalServerError(err)
+		ctx.APIErrorInternal(err)
 		return
 	}
-	ctx.Status(http.StatusResetContent)
+	if err = notif.LoadAttributes(ctx); err != nil && !issues_model.IsErrCommentNotExist(err) {
+		ctx.APIErrorInternal(err)
+		return
+	}
+	ctx.JSON(http.StatusResetContent, convert.ToNotificationThread(ctx, notif))
 }
 
-func getThread(ctx *context.APIContext) *models.Notification {
-	n, err := models.GetNotificationByID(ctx.ParamsInt64(":id"))
+func getThread(ctx *context.APIContext) *activities_model.Notification {
+	n, err := activities_model.GetNotificationByID(ctx, ctx.PathParamInt64("id"))
 	if err != nil {
-		if models.IsErrNotExist(err) {
-			ctx.Error(http.StatusNotFound, "GetNotificationByID", err)
+		if db.IsErrNotExist(err) {
+			ctx.APIError(http.StatusNotFound, err.Error())
 		} else {
-			ctx.InternalServerError(err)
+			ctx.APIErrorInternal(err)
 		}
 		return nil
 	}
-	if n.UserID != ctx.User.ID && !ctx.User.IsAdmin {
-		ctx.Error(http.StatusForbidden, "GetNotificationByID", fmt.Errorf("only user itself and admin are allowed to read/change this thread %d", n.ID))
+	if n.UserID != ctx.Doer.ID && !ctx.Doer.IsAdmin {
+		ctx.APIError(http.StatusForbidden, fmt.Sprintf("only user itself and admin are allowed to read/change this thread %d", n.ID))
 		return nil
 	}
 	return n

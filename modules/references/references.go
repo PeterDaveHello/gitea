@@ -1,49 +1,78 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package references
 
 import (
+	"bytes"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/markup/mdstripper"
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/markup/mdstripper"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/util"
 )
 
-var (
+var globalVars = sync.OnceValue(func() (ret struct {
+	validNamePattern                  *regexp.Regexp
+	mentionPattern                    *regexp.Regexp
+	issueNumericPattern               *regexp.Regexp
+	issueAlphanumericPattern          *regexp.Regexp
+	crossReferenceIssueNumericPattern *regexp.Regexp
+	crossReferenceCommitPattern       *regexp.Regexp
+	timeLogPattern                    *regexp.Regexp
+},
+) {
 	// validNamePattern performs only the most basic validation for user or repository names
 	// Repository name should contain only alphanumeric, dash ('-'), underscore ('_') and dot ('.') characters.
-	validNamePattern = regexp.MustCompile(`^[a-z0-9_.-]+$`)
+	ret.validNamePattern = regexp.MustCompile(`^[a-z0-9_.-]+$`)
 
 	// NOTE: All below regex matching do not perform any extra validation.
 	// Thus a link is produced even if the linked entity does not exist.
-	// While fast, this is also incorrect and lead to false positives.
+	// While fast, this is also incorrect and leads to false positives.
 	// TODO: fix invalid linking issue
 
-	// mentionPattern matches all mentions in the form of "@user"
-	mentionPattern = regexp.MustCompile(`(?:\s|^|\(|\[)(@[0-9a-zA-Z-_]+|@[0-9a-zA-Z-_][0-9a-zA-Z-_.]+[0-9a-zA-Z-_])(?:\s|[:,;.?!]\s|[:,;.?!]?$|\)|\])`)
+	// mentionPattern matches all mentions in the form of "@user" or "@org/team"
+	ret.mentionPattern = regexp.MustCompile(`(?:\s|^|\(|\[)(@[-\w][-.\w]*?|@[-\w][-.\w]*?/[-\w][-.\w]*?)(?:\s|$|[:,;.?!](\s|$)|'|\)|\])`)
 	// issueNumericPattern matches string that references to a numeric issue, e.g. #1287
-	issueNumericPattern = regexp.MustCompile(`(?:\s|^|\(|\[)([#!][0-9]+)(?:\s|$|\)|\]|[:;,.?!]\s|[:;,.?!]$)`)
+	// TODO: REFERENCE-REGEXP-PATTERN: findValidReferenceIndex checks a non-ASCII trailing character
+	ret.issueNumericPattern = regexp.MustCompile(`(?:\s|^|\(|\[|\'|\"|[^\x00-\x7f])([#!][0-9]+)(?:\s|$|\)|\]|\'|\"|[:;,.?!]\s|[:;,.?!]$|[^\x00-\x7f])`)
 	// issueAlphanumericPattern matches string that references to an alphanumeric issue, e.g. ABC-1234
-	issueAlphanumericPattern = regexp.MustCompile(`(?:\s|^|\(|\[)([A-Z]{1,10}-[1-9][0-9]*)(?:\s|$|\)|\]|:|\.(\s|$))`)
+	ret.issueAlphanumericPattern = regexp.MustCompile(`(?:\s|^|\(|\[|\"|\')([A-Z]{1,10}-[1-9][0-9]*)(?:\s|$|\)|\]|:|\.(\s|$)|\"|\'|,)`)
 	// crossReferenceIssueNumericPattern matches string that references a numeric issue in a different repository
-	// e.g. gogits/gogs#12345
-	crossReferenceIssueNumericPattern = regexp.MustCompile(`(?:\s|^|\(|\[)([0-9a-zA-Z-_\.]+/[0-9a-zA-Z-_\.]+[#!][0-9]+)(?:\s|$|\)|\]|[:;,.?!]\s|[:;,.?!]$)`)
-	// spaceTrimmedPattern let's us find the trailing space
-	spaceTrimmedPattern = regexp.MustCompile(`(?:.*[0-9a-zA-Z-_])\s`)
+	// e.g. org/repo#12345
+	// TODO: REFERENCE-REGEXP-PATTERN: findValidReferenceIndex checks a non-ASCII trailing character
+	ret.crossReferenceIssueNumericPattern = regexp.MustCompile(`(?:\s|^|\(|\[|[^\x00-\x7f])([0-9a-zA-Z-_\.]+/[0-9a-zA-Z-_\.]+[#!][0-9]+)(?:\s|$|\)|\]|[:;,.?!]\s|[:;,.?!]$|[^\x00-\x7f])`)
+	// crossReferenceCommitPattern matches a string that references a commit in a different repository
+	// e.g. go-gitea/gitea@d8a994ef, go-gitea/gitea@d8a994ef243349f321568f9e36d5c3f444b99cae (7-40 characters)
+	ret.crossReferenceCommitPattern = regexp.MustCompile(`(?:\s|^|\(|\[)([0-9a-zA-Z-_\.]+)/([0-9a-zA-Z-_\.]+)@([0-9a-f]{7,64})(?:\s|$|\)|\]|[:;,.?!]\s|[:;,.?!]$)`)
+	// timeLogPattern matches string for time tracking
+	ret.timeLogPattern = regexp.MustCompile(`(?:\s|^|\(|\[)(@([0-9]+([\.,][0-9]+)?(w|d|m|h))+)(?:\s|$|\)|\]|[:;,.?!]\s|[:;,.?!]$)`)
+	return ret
+})
 
+var (
 	issueCloseKeywordsPat, issueReopenKeywordsPat *regexp.Regexp
+	issueKeywordWindow                            int
 	issueKeywordsOnce                             sync.Once
 
 	giteaHostInit         sync.Once
 	giteaHost             string
 	giteaIssuePullPattern *regexp.Regexp
+
+	actionStrings = []string{
+		"none",
+		"closes",
+		"reopens",
+		"neutered",
+	}
 )
 
 // XRefAction represents the kind of effect a cross reference has once is resolved
@@ -60,12 +89,18 @@ const (
 	XRefActionNeutered // 3
 )
 
+func (a XRefAction) String() string {
+	return actionStrings[a]
+}
+
 // IssueReference contains an unverified cross-reference to a local issue or pull request
 type IssueReference struct {
-	Index  int64
-	Owner  string
-	Name   string
-	Action XRefAction
+	Index   int64
+	Owner   string
+	Name    string
+	IsPull  bool
+	Action  XRefAction
+	TimeLog string
 }
 
 // RenderizableReference contains an unverified cross-reference to with rendering information
@@ -76,6 +111,7 @@ type RenderizableReference struct {
 	Issue          string
 	Owner          string
 	Name           string
+	CommitSha      string
 	IsPull         bool
 	RefLocation    *RefSpan
 	Action         XRefAction
@@ -91,16 +127,19 @@ type rawReference struct {
 	issue          string
 	refLocation    *RefSpan
 	actionLocation *RefSpan
+	timeLog        string
 }
 
 func rawToIssueReferenceList(reflist []*rawReference) []IssueReference {
 	refarr := make([]IssueReference, len(reflist))
 	for i, r := range reflist {
 		refarr[i] = IssueReference{
-			Index:  r.index,
-			Owner:  r.owner,
-			Name:   r.name,
-			Action: r.action,
+			Index:   r.index,
+			Owner:   r.owner,
+			Name:    r.name,
+			IsPull:  r.isPull,
+			Action:  r.action,
+			TimeLog: r.timeLog,
 		}
 	}
 	return refarr
@@ -143,9 +182,13 @@ func newKeywords() {
 	})
 }
 
-func doNewKeywords(close []string, reopen []string) {
-	issueCloseKeywordsPat = makeKeywordsPat(close)
-	issueReopenKeywordsPat = makeKeywordsPat(reopen)
+func doNewKeywords(closeKeywords, reopenKeywords []string) {
+	issueCloseKeywordsPat = makeKeywordsPat(closeKeywords)
+	issueReopenKeywordsPat = makeKeywordsPat(reopenKeywords)
+	issueKeywordWindow = 0
+	for _, word := range slices.Concat(closeKeywords, reopenKeywords) {
+		issueKeywordWindow = max(issueKeywordWindow, utf8.RuneCountInString(word)*utf8.UTFMax+3) // delimiter, keyword with (?i)-folded runes like ſ for s, ": "
+	}
 }
 
 // getGiteaHostName returns a normalized string with the local host name, with no scheme or port information
@@ -194,25 +237,23 @@ func FindAllMentionsBytes(content []byte) []RefSpan {
 	ret := make([]RefSpan, 0, 5)
 	pos := 0
 	for {
-		match := mentionPattern.FindSubmatchIndex(content[pos:])
+		match := globalVars().mentionPattern.FindSubmatchIndex(content[pos:])
 		if match == nil {
 			break
 		}
 		ret = append(ret, RefSpan{Start: match[2] + pos, End: match[3] + pos})
-		notrail := spaceTrimmedPattern.FindSubmatchIndex(content[match[2]+pos : match[3]+pos])
-		if notrail == nil {
-			pos = match[3] + pos
-		} else {
-			pos = match[3] + pos + notrail[1] - notrail[3]
-		}
+		pos += match[3]
 	}
 	return ret
 }
 
 // FindFirstMentionBytes matches the first mention in then given content
-// and returns the location of the unvalidated user name, including the @ prefix.
+// and returns the location of the unvalidated username, including the @ prefix.
 func FindFirstMentionBytes(content []byte) (bool, RefSpan) {
-	mention := mentionPattern.FindSubmatchIndex(content)
+	if bytes.IndexByte(content, '@') == -1 { // the regexp is slow, skip texts which can't match
+		return false, RefSpan{}
+	}
+	mention := globalVars().mentionPattern.FindSubmatchIndex(content)
 	if mention == nil {
 		return false, RefSpan{}
 	}
@@ -227,7 +268,73 @@ func FindAllIssueReferencesMarkdown(content string) []IssueReference {
 
 func findAllIssueReferencesMarkdown(content string) []*rawReference {
 	bcontent, links := mdstripper.StripMarkdownBytes([]byte(content))
-	return findAllIssueReferencesBytes(bcontent, links)
+	return findAllIssueReferencesBytes(bcontent, links, []byte(content))
+}
+
+func convertFullHTMLReferencesToShortRefs(re *regexp.Regexp, contentBytes *[]byte) {
+	// We will iterate through the content, rewrite and simplify full references.
+	//
+	// We want to transform something like:
+	//
+	// this is a https://ourgitea.com/git/owner/repo/issues/123456789, foo
+	// https://ourgitea.com/git/owner/repo/pulls/123456789
+	//
+	// Into something like:
+	//
+	// this is a #123456789, foo
+	// !123456789
+
+	pos := 0
+	for {
+		// re looks for something like: (\s|^|\(|\[)https://ourgitea.com/git/(owner/repo)/(issues)/(123456789)(?:\s|$|\)|\]|[:;,.?!]\s|[:;,.?!]$)
+		match := re.FindSubmatchIndex((*contentBytes)[pos:])
+		if match == nil {
+			break
+		}
+		// match is a bunch of indices into the content from pos onwards so
+		// to simplify things let's just add pos to all of the indices in match
+		for i := range match {
+			match[i] += pos
+		}
+
+		// match[0]-match[1] is whole string
+		// match[2]-match[3] is preamble
+
+		// move the position to the end of the preamble
+		pos = match[3]
+
+		// match[4]-match[5] is owner/repo
+		// now copy the owner/repo to end of the preamble
+		endPos := pos + match[5] - match[4]
+		copy((*contentBytes)[pos:endPos], (*contentBytes)[match[4]:match[5]])
+
+		// move the current position to the end of the newly copied owner/repo
+		pos = endPos
+
+		// Now set the issue/pull marker:
+		//
+		// match[6]-match[7] == 'issues'
+		(*contentBytes)[pos] = '#'
+		if string((*contentBytes)[match[6]:match[7]]) == "pulls" {
+			(*contentBytes)[pos] = '!'
+		}
+		pos++
+
+		// Then add the issue/pull number
+		//
+		// match[8]-match[9] is the number
+		endPos = pos + match[9] - match[8]
+		copy((*contentBytes)[pos:endPos], (*contentBytes)[match[8]:match[9]])
+
+		// Now copy what's left at the end of the string to the new end position
+		copy((*contentBytes)[endPos:], (*contentBytes)[match[9]:])
+		// now we reset the length
+
+		// our new section has length endPos - match[3]
+		// our old section has length match[9] - match[3]
+		*contentBytes = (*contentBytes)[:len(*contentBytes)-match[9]+endPos]
+		pos = endPos
+	}
 }
 
 // FindAllIssueReferences returns a list of unvalidated references found in a string.
@@ -235,55 +342,57 @@ func FindAllIssueReferences(content string) []IssueReference {
 	// Need to convert fully qualified html references to local system to #/! short codes
 	contentBytes := []byte(content)
 	if re := getGiteaIssuePullPattern(); re != nil {
-		pos := 0
-		for {
-			match := re.FindSubmatchIndex(contentBytes[pos:])
-			if match == nil {
-				break
-			}
-			// match[0]-match[1] is whole string
-			// match[2]-match[3] is preamble
-			pos += match[3]
-			// match[4]-match[5] is owner/repo
-			endPos := pos + match[5] - match[4]
-			copy(contentBytes[pos:endPos], contentBytes[match[4]:match[5]])
-			pos = endPos
-			// match[6]-match[7] == 'issues'
-			contentBytes[pos] = '#'
-			if string(contentBytes[match[6]:match[7]]) == "pulls" {
-				contentBytes[pos] = '!'
-			}
-			pos++
-			// match[8]-match[9] is the number
-			endPos = pos + match[9] - match[8]
-			copy(contentBytes[pos:endPos], contentBytes[match[8]:match[9]])
-			copy(contentBytes[endPos:], contentBytes[match[9]:])
-			// now we reset the length
-			// our new section has length endPos - match[3]
-			// our old section has length match[9] - match[3]
-			contentBytes = contentBytes[:len(contentBytes)-match[9]+endPos]
-			pos = endPos
-		}
+		convertFullHTMLReferencesToShortRefs(re, &contentBytes)
 	} else {
 		log.Debug("No GiteaIssuePullPattern pattern")
 	}
-	return rawToIssueReferenceList(findAllIssueReferencesBytes(contentBytes, []string{}))
+	return rawToIssueReferenceList(findAllIssueReferencesBytes(contentBytes, []string{}, nil))
+}
+
+func isReferencePostBoundary(r rune) bool {
+	isWordChar := unicode.In(r, unicode.L, unicode.M, unicode.Nd, unicode.Nl, unicode.Pc, unicode.Other_Alphabetic, unicode.Join_Control)
+	return !isWordChar
+}
+
+// findValidReferenceIndex returns the first match from pos that isn't followed by a word character
+func findValidReferenceIndex(pattern *regexp.Regexp, content []byte, pos int) []int {
+	for pos < len(content) {
+		match := pattern.FindSubmatchIndex(content[pos:])
+		if match == nil {
+			return nil
+		}
+		for i := range match {
+			match[i] += pos
+		}
+		// TODO: REFERENCE-REGEXP-PATTERN: it depends on the regex pattern: the target is in the second capture group.
+		// It is very fragile because the pattern is passed in freely.
+		remaining := content[match[3]:]
+		if r, _ := utf8.DecodeRune(remaining); isReferencePostBoundary(r) {
+			return match
+		}
+		pos = match[3]
+	}
+	return nil
 }
 
 // FindRenderizableReferenceNumeric returns the first unvalidated reference found in a string.
-func FindRenderizableReferenceNumeric(content string, prOnly bool) (bool, *RenderizableReference) {
-	match := issueNumericPattern.FindStringSubmatchIndex(content)
+func FindRenderizableReferenceNumeric(content string, prOnly, crossLinkOnly bool) *RenderizableReference {
+	contentBytes := util.UnsafeStringToBytes(content)
+	var match []int
+	if !crossLinkOnly {
+		match = findValidReferenceIndex(globalVars().issueNumericPattern, contentBytes, 0)
+	}
 	if match == nil {
-		if match = crossReferenceIssueNumericPattern.FindStringSubmatchIndex(content); match == nil {
-			return false, nil
+		if match = findValidReferenceIndex(globalVars().crossReferenceIssueNumericPattern, contentBytes, 0); match == nil {
+			return nil
 		}
 	}
-	r := getCrossReference([]byte(content), match[2], match[3], false, prOnly)
+	r := getCrossReference(contentBytes, match[2], match[3], false, prOnly)
 	if r == nil {
-		return false, nil
+		return nil
 	}
 
-	return true, &RenderizableReference{
+	return &RenderizableReference{
 		Issue:          r.issue,
 		Owner:          r.owner,
 		Name:           r.name,
@@ -294,17 +403,65 @@ func FindRenderizableReferenceNumeric(content string, prOnly bool) (bool, *Rende
 	}
 }
 
-// FindRenderizableReferenceAlphanumeric returns the first alphanumeric unvalidated references found in a string.
-func FindRenderizableReferenceAlphanumeric(content string) (bool, *RenderizableReference) {
-	match := issueAlphanumericPattern.FindStringSubmatchIndex(content)
-	if match == nil {
+// FindRenderizableCommitCrossReference returns the first unvalidated commit cross reference found in a string.
+func FindRenderizableCommitCrossReference(content string) (bool, *RenderizableReference) {
+	if !strings.Contains(content, "@") { // the regexp is slow, skip texts which can't match
+		return false, nil
+	}
+	m := globalVars().crossReferenceCommitPattern.FindStringSubmatchIndex(content)
+	if len(m) < 8 {
 		return false, nil
 	}
 
-	action, location := findActionKeywords([]byte(content), match[2])
-
 	return true, &RenderizableReference{
-		Issue:          string(content[match[2]:match[3]]),
+		Owner:       content[m[2]:m[3]],
+		Name:        content[m[4]:m[5]],
+		CommitSha:   content[m[6]:m[7]],
+		RefLocation: &RefSpan{Start: m[2], End: m[7]},
+	}
+}
+
+// FindRenderizableReferenceRegexp returns the first regexp unvalidated references found in a string.
+func FindRenderizableReferenceRegexp(content string, pattern *regexp.Regexp) *RenderizableReference {
+	match := pattern.FindStringSubmatchIndex(content)
+	if len(match) < 4 {
+		return nil
+	}
+
+	// The external tracker pattern can use alternatives with separate capture
+	// groups. Pick the first group that participated in this match instead of
+	// assuming the first group always did.
+	issueStart, issueEnd := -1, -1
+	for i := 2; i+1 < len(match); i += 2 {
+		if match[i] >= 0 {
+			issueStart, issueEnd = match[i], match[i+1]
+			break
+		}
+	}
+	if issueStart < 0 {
+		return nil
+	}
+
+	action, location := findActionKeywords([]byte(content), issueStart)
+	return &RenderizableReference{
+		Issue:          content[issueStart:issueEnd],
+		RefLocation:    &RefSpan{Start: match[0], End: match[1]},
+		Action:         action,
+		ActionLocation: location,
+		IsPull:         false,
+	}
+}
+
+// FindRenderizableReferenceAlphanumeric returns the first alphanumeric unvalidated references found in a string.
+func FindRenderizableReferenceAlphanumeric(content string) *RenderizableReference {
+	match := globalVars().issueAlphanumericPattern.FindStringSubmatchIndex(content)
+	if match == nil {
+		return nil
+	}
+
+	action, location := findActionKeywords([]byte(content), match[2])
+	return &RenderizableReference{
+		Issue:          content[match[2]:match[3]],
 		RefLocation:    &RefSpan{Start: match[2], End: match[3]},
 		Action:         action,
 		ActionLocation: location,
@@ -313,46 +470,19 @@ func FindRenderizableReferenceAlphanumeric(content string) (bool, *RenderizableR
 }
 
 // FindAllIssueReferencesBytes returns a list of unvalidated references found in a byte slice.
-func findAllIssueReferencesBytes(content []byte, links []string) []*rawReference {
-
+// originalContent is optional and used to detect closing/reopening keywords for URL references.
+func findAllIssueReferencesBytes(content []byte, links []string, originalContent []byte) []*rawReference {
 	ret := make([]*rawReference, 0, 10)
-	pos := 0
 
 	// Sadly we can't use FindAllSubmatchIndex because our pattern checks for starting and
 	// trailing spaces (\s#ref,\s), so if we get two consecutive references, the space
 	// from the second reference will be "eaten" by the first one:
 	// ...\s#ref1\s#ref2\s...	--> ...`\s#ref1\s`, (not) `#ref2,\s...`
-	for {
-		match := issueNumericPattern.FindSubmatchIndex(content[pos:])
-		if match == nil {
-			break
-		}
-		if ref := getCrossReference(content, match[2]+pos, match[3]+pos, false, false); ref != nil {
-			ret = append(ret, ref)
-		}
-		notrail := spaceTrimmedPattern.FindSubmatchIndex(content[match[2]+pos : match[3]+pos])
-		if notrail == nil {
-			pos = match[3] + pos
-		} else {
-			pos = match[3] + pos + notrail[1] - notrail[3]
-		}
-	}
-
-	pos = 0
-
-	for {
-		match := crossReferenceIssueNumericPattern.FindSubmatchIndex(content[pos:])
-		if match == nil {
-			break
-		}
-		if ref := getCrossReference(content, match[2]+pos, match[3]+pos, false, false); ref != nil {
-			ret = append(ret, ref)
-		}
-		notrail := spaceTrimmedPattern.FindSubmatchIndex(content[match[2]+pos : match[3]+pos])
-		if notrail == nil {
-			pos = match[3] + pos
-		} else {
-			pos = match[3] + pos + notrail[1] - notrail[3]
+	for _, pattern := range []*regexp.Regexp{globalVars().issueNumericPattern, globalVars().crossReferenceIssueNumericPattern} {
+		for match := findValidReferenceIndex(pattern, content, 0); match != nil; match = findValidReferenceIndex(pattern, content, match[3]) {
+			if ref := getCrossReference(content, match[2], match[3], false, false); ref != nil {
+				ret = append(ret, ref)
+			}
 		}
 	}
 
@@ -370,37 +500,86 @@ func findAllIssueReferencesBytes(content []byte, links []string) []*rawReference
 				continue
 			}
 			var sep string
-			if parts[3] == "issues" {
+			switch parts[3] {
+			case "issues":
 				sep = "#"
-			} else if parts[3] == "pulls" {
+			case "pulls":
 				sep = "!"
-			} else {
+			default:
 				continue
 			}
-			// Note: closing/reopening keywords not supported with URLs
-			bytes := []byte(parts[1] + "/" + parts[2] + sep + parts[4])
-			if ref := getCrossReference(bytes, 0, len(bytes), true, false); ref != nil {
+			refBytes := []byte(parts[1] + "/" + parts[2] + sep + parts[4])
+			if ref := getCrossReference(refBytes, 0, len(refBytes), true, false); ref != nil {
 				ref.refLocation = nil
+				// Detect closing/reopening keywords by finding the URL position in original content
+				if originalContent != nil {
+					if idx := bytes.Index(originalContent, []byte(link)); idx > 0 {
+						// For markdown links [text](url), find the opening bracket before the URL
+						// to properly detect keywords like "closes [text](url)"
+						searchStart := idx
+						if idx >= 2 && originalContent[idx-1] == '(' {
+							// Find the matching '[' for this markdown link
+							bracketIdx := bytes.LastIndex(originalContent[:idx-1], []byte{'['})
+							if bracketIdx >= 0 {
+								searchStart = bracketIdx
+							}
+						}
+						action, location := findActionKeywords(originalContent, searchStart)
+						ref.action = action
+						ref.actionLocation = location
+					}
+				}
 				ret = append(ret, ref)
 			}
+		}
+	}
+
+	if len(ret) == 0 {
+		return ret
+	}
+
+	pos := 0
+
+	for {
+		match := globalVars().timeLogPattern.FindSubmatchIndex(content[pos:])
+		if match == nil {
+			break
+		}
+
+		timeLogEntry := string(content[match[2]+pos+1 : match[3]+pos])
+
+		var f *rawReference
+		for _, ref := range ret {
+			if ref.refLocation != nil && ref.refLocation.End < match[2]+pos && (f == nil || f.refLocation.End < ref.refLocation.End) {
+				f = ref
+			}
+		}
+
+		pos = match[1] + pos
+
+		if f == nil {
+			f = ret[0]
+		}
+
+		if len(f.timeLog) == 0 {
+			f.timeLog = timeLogEntry
 		}
 	}
 
 	return ret
 }
 
-func getCrossReference(content []byte, start, end int, fromLink bool, prOnly bool) *rawReference {
-	refid := string(content[start:end])
-	sep := strings.IndexAny(refid, "#!")
+func getCrossReference(content []byte, start, end int, fromLink, prOnly bool) *rawReference {
+	sep := bytes.IndexAny(content[start:end], "#!")
 	if sep < 0 {
 		return nil
 	}
-	isPull := refid[sep] == '!'
+	isPull := content[start+sep] == '!'
 	if prOnly && !isPull {
 		return nil
 	}
-	repo := refid[:sep]
-	issue := refid[sep+1:]
+	repo := string(content[start : start+sep])
+	issue := string(content[start+sep+1 : end])
 	index, err := strconv.ParseInt(issue, 10, 64)
 	if err != nil {
 		return nil
@@ -425,7 +604,7 @@ func getCrossReference(content []byte, start, end int, fromLink bool, prOnly boo
 		return nil
 	}
 	owner, name := parts[0], parts[1]
-	if !validNamePattern.MatchString(owner) || !validNamePattern.MatchString(name) {
+	if !globalVars().validNamePattern.MatchString(owner) || !globalVars().validNamePattern.MatchString(name) {
 		return nil
 	}
 	action, location := findActionKeywords(content, start)
@@ -443,24 +622,23 @@ func getCrossReference(content []byte, start, end int, fromLink bool, prOnly boo
 
 func findActionKeywords(content []byte, start int) (XRefAction, *RefSpan) {
 	newKeywords()
-	var m []int
+	windowStart := max(start-issueKeywordWindow, 0)
+	prefix := content[windowStart:start]
 	if issueCloseKeywordsPat != nil {
-		m = issueCloseKeywordsPat.FindSubmatchIndex(content[:start])
-		if m != nil {
-			return XRefActionCloses, &RefSpan{Start: m[2], End: m[3]}
+		if m := issueCloseKeywordsPat.FindSubmatchIndex(prefix); m != nil {
+			return XRefActionCloses, &RefSpan{Start: windowStart + m[2], End: windowStart + m[3]}
 		}
 	}
 	if issueReopenKeywordsPat != nil {
-		m = issueReopenKeywordsPat.FindSubmatchIndex(content[:start])
-		if m != nil {
-			return XRefActionReopens, &RefSpan{Start: m[2], End: m[3]}
+		if m := issueReopenKeywordsPat.FindSubmatchIndex(prefix); m != nil {
+			return XRefActionReopens, &RefSpan{Start: windowStart + m[2], End: windowStart + m[3]}
 		}
 	}
 	return XRefActionNone, nil
 }
 
 // IsXrefActionable returns true if the xref action is actionable (i.e. produces a result when resolved)
-func IsXrefActionable(ref *RenderizableReference, extTracker bool, alphaNum bool) bool {
+func IsXrefActionable(ref *RenderizableReference, extTracker bool) bool {
 	if extTracker {
 		// External issues cannot be automatically closed
 		return false

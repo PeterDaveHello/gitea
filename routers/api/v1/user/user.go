@@ -1,22 +1,18 @@
 // Copyright 2014 The Gogs Authors. All rights reserved.
 // Copyright 2020 The Gitea Authors.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package user
 
 import (
-	"fmt"
 	"net/http"
-	"strings"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/convert"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/routers/api/v1/utils"
-
-	"github.com/unknwon/com"
+	activities_model "gitea.dev/models/activities"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/routers/api/v1/utils"
+	"gitea.dev/services/context"
+	"gitea.dev/services/convert"
+	feed_service "gitea.dev/services/feed"
 )
 
 // Search search users
@@ -59,34 +55,41 @@ func Search(ctx *context.APIContext) {
 
 	listOptions := utils.GetListOptions(ctx)
 
-	opts := &models.SearchUserOptions{
-		Keyword:     strings.Trim(ctx.Query("q"), " "),
-		UID:         com.StrTo(ctx.Query("uid")).MustInt64(),
-		Type:        models.UserTypeIndividual,
-		ListOptions: listOptions,
+	uid := ctx.FormInt64("uid")
+	var users []*user_model.User
+	var maxResults int64
+	if uid < 0 {
+		_, sysUser, _ := user_model.GetPossibleUserByID(ctx, uid)
+		if sysUser != nil && sysUser.ID == uid {
+			maxResults = 1
+			users = []*user_model.User{sysUser}
+		}
+	} else {
+		opts := user_model.SearchUserOptions{
+			Actor:         ctx.Doer,
+			Keyword:       ctx.FormTrim("q"),
+			UID:           uid,
+			Types:         []user_model.UserType{user_model.UserTypeIndividual},
+			SearchByEmail: true,
+			ListOptions:   listOptions,
+		}
+		var err error
+		users, maxResults, err = user_model.SearchUsers(ctx, opts)
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, map[string]any{
+				"ok":    false,
+				"error": err.Error(),
+			})
+			return
+		}
 	}
 
-	users, maxResults, err := models.SearchUsers(opts)
-	if err != nil {
-		ctx.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"ok":    false,
-			"error": err.Error(),
-		})
-		return
-	}
+	ctx.SetLinkHeader(maxResults, listOptions.PageSize)
+	ctx.SetTotalCountHeader(maxResults)
 
-	results := make([]*api.User, len(users))
-	for i := range users {
-		results[i] = convert.ToUser(users[i], ctx.IsSigned, ctx.User != nil && ctx.User.IsAdmin)
-	}
-
-	ctx.SetLinkHeader(int(maxResults), listOptions.PageSize)
-	ctx.Header().Set("X-Total-Count", fmt.Sprintf("%d", maxResults))
-	ctx.Header().Set("Access-Control-Expose-Headers", "X-Total-Count, Link")
-
-	ctx.JSON(http.StatusOK, map[string]interface{}{
+	ctx.JSON(http.StatusOK, map[string]any{
 		"ok":   true,
-		"data": results,
+		"data": convert.ToUsers(ctx, ctx.Doer, users),
 	})
 }
 
@@ -100,26 +103,21 @@ func GetInfo(ctx *context.APIContext) {
 	// parameters:
 	// - name: username
 	//   in: path
-	//   description: username of user to get
+	//   description: username of the user whose data is to be listed
 	//   type: string
 	//   required: true
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/User"
-	//   "404":
-	//     "$ref": "#/responses/notFound"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	u, err := models.GetUserByName(ctx.Params(":username"))
-	if err != nil {
-		if models.IsErrUserNotExist(err) {
-			ctx.NotFound()
-		} else {
-			ctx.Error(http.StatusInternalServerError, "GetUserByName", err)
-		}
+	if !user_model.IsUserVisibleToViewer(ctx, ctx.ContextUser, ctx.Doer) {
+		// fake ErrUserNotExist error message to not leak information about existence
+		ctx.APIErrorNotFound()
 		return
 	}
-
-	ctx.JSON(http.StatusOK, convert.ToUser(u, ctx.IsSigned, ctx.User != nil && (ctx.User.ID == u.ID || ctx.User.IsAdmin)))
+	ctx.JSON(http.StatusOK, convert.ToUser(ctx, ctx.ContextUser, ctx.Doer))
 }
 
 // GetAuthenticatedUser get current user's information
@@ -133,7 +131,7 @@ func GetAuthenticatedUser(ctx *context.APIContext) {
 	//   "200":
 	//     "$ref": "#/responses/User"
 
-	ctx.JSON(http.StatusOK, convert.ToUser(ctx.User, ctx.IsSigned, ctx.User != nil))
+	ctx.JSON(http.StatusOK, convert.ToUser(ctx, ctx.Doer, ctx.Doer))
 }
 
 // GetUserHeatmapData is the handler to get a users heatmap
@@ -146,30 +144,76 @@ func GetUserHeatmapData(ctx *context.APIContext) {
 	// parameters:
 	// - name: username
 	//   in: path
-	//   description: username of user to get
+	//   description: username of the user whose heatmap is to be obtained
 	//   type: string
 	//   required: true
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/UserHeatmapData"
-	//   "404":
-	//     "$ref": "#/responses/notFound"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	// Get the user to throw an error if it does not exist
-	user, err := models.GetUserByName(ctx.Params(":username"))
+	heatmap, err := activities_model.GetUserHeatmapDataByUser(ctx, ctx.ContextUser, ctx.Doer)
 	if err != nil {
-		if models.IsErrUserNotExist(err) {
-			ctx.Status(http.StatusNotFound)
-		} else {
-			ctx.Error(http.StatusInternalServerError, "GetUserByName", err)
-		}
-		return
-	}
-
-	heatmap, err := models.GetUserHeatmapDataByUser(user)
-	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetUserHeatmapDataByUser", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 	ctx.JSON(http.StatusOK, heatmap)
+}
+
+func ListUserActivityFeeds(ctx *context.APIContext) {
+	// swagger:operation GET /users/{username}/activities/feeds user userListActivityFeeds
+	// ---
+	// summary: List a user's activity feeds
+	// produces:
+	// - application/json
+	// parameters:
+	// - name: username
+	//   in: path
+	//   description: username of the user whose activity feeds are to be listed
+	//   type: string
+	//   required: true
+	// - name: only-performed-by
+	//   in: query
+	//   description: if true, only show actions performed by the requested user
+	//   type: boolean
+	// - name: date
+	//   in: query
+	//   description: the date of the activities to be found
+	//   type: string
+	//   format: date
+	// - name: page
+	//   in: query
+	//   description: page number of results to return (1-based)
+	//   type: integer
+	// - name: limit
+	//   in: query
+	//   description: page size of results
+	//   type: integer
+	// responses:
+	//   "200":
+	//     "$ref": "#/responses/ActivityFeedsList"
+	//   default:
+	//     "$ref": "#/responses/error"
+
+	includePrivate := ctx.IsSigned && (ctx.Doer.IsAdmin || ctx.Doer.ID == ctx.ContextUser.ID)
+	listOptions := utils.GetListOptions(ctx)
+
+	opts := activities_model.GetFeedsOptions{
+		RequestedUser:   ctx.ContextUser,
+		Actor:           ctx.Doer,
+		IncludePrivate:  includePrivate,
+		OnlyPerformedBy: ctx.FormBool("only-performed-by"),
+		Date:            ctx.FormString("date"),
+		ListOptions:     listOptions,
+	}
+
+	feeds, count, err := feed_service.GetFeeds(ctx, opts)
+	if err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+	ctx.SetTotalCountHeader(count)
+
+	ctx.JSON(http.StatusOK, convert.ToActivities(ctx, feeds, ctx.Doer))
 }

@@ -1,6 +1,5 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package repo
 
@@ -9,37 +8,25 @@ import (
 	"net/http"
 	"strconv"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/modules/log"
+	repo_model "gitea.dev/models/repo"
+	"gitea.dev/modules/log"
+	"gitea.dev/services/context"
 )
 
-type languageResponse []*models.LanguageStat
+type languageResponse []*repo_model.LanguageStat
 
 func (l languageResponse) MarshalJSON() ([]byte, error) {
 	var buf bytes.Buffer
-	if _, err := buf.WriteString("{"); err != nil {
-		return nil, err
-	}
+	buf.WriteString("{")
 	for i, lang := range l {
 		if i > 0 {
-			if _, err := buf.WriteString(","); err != nil {
-				return nil, err
-			}
+			buf.WriteString(",")
 		}
-		if _, err := buf.WriteString(strconv.Quote(lang.Language)); err != nil {
-			return nil, err
-		}
-		if _, err := buf.WriteString(":"); err != nil {
-			return nil, err
-		}
-		if _, err := buf.WriteString(strconv.FormatInt(lang.Size, 10)); err != nil {
-			return nil, err
-		}
+		buf.WriteString(strconv.Quote(lang.Language))
+		buf.WriteString(":")
+		buf.WriteString(strconv.FormatInt(lang.Size, 10))
 	}
-	if _, err := buf.WriteString("}"); err != nil {
-		return nil, err
-	}
+	buf.WriteString("}")
 
 	return buf.Bytes(), nil
 }
@@ -63,22 +50,20 @@ func GetLanguages(ctx *context.APIContext) {
 	//   type: string
 	//   required: true
 	// responses:
-	//   "404":
-	//     "$ref": "#/responses/notFound"
 	//   "200":
 	//     "$ref": "#/responses/LanguageStatistics"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	langs, err := ctx.Repo.Repository.GetLanguageStats()
+	langs, err := repo_model.GetLanguageStats(ctx, ctx.Repo.Repository)
 	if err != nil {
 		log.Error("GetLanguageStats failed: %v", err)
-		ctx.InternalServerError(err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
 	resp := make(languageResponse, len(langs))
-	for i, v := range langs {
-		resp[i] = v
-	}
+	copy(resp, langs)
 
 	ctx.JSON(http.StatusOK, resp)
 }

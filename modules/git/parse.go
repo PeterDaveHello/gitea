@@ -1,6 +1,5 @@
-// Copyright 2018 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// Copyright 2024 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
 
 package git
 
@@ -8,74 +7,66 @@ import (
 	"bytes"
 	"fmt"
 	"strconv"
+	"strings"
 
-	"github.com/go-git/go-git/v5/plumbing/filemode"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"gitea.dev/modules/optional"
 )
 
-// ParseTreeEntries parses the output of a `git ls-tree` command.
-func ParseTreeEntries(data []byte) ([]*TreeEntry, error) {
-	return parseTreeEntries(data, nil)
+var sepSpace = []byte{' '}
+
+type LsTreeEntry struct {
+	ID        ObjectID
+	EntryMode EntryMode
+	Name      string
+	Size      optional.Option[int64]
 }
 
-func parseTreeEntries(data []byte, ptree *Tree) ([]*TreeEntry, error) {
-	entries := make([]*TreeEntry, 0, 10)
-	for pos := 0; pos < len(data); {
-		// expect line to be of the form "<mode> <type> <sha>\t<filename>"
-		entry := new(TreeEntry)
-		entry.gogitTreeEntry = &object.TreeEntry{}
-		entry.ptree = ptree
-		if pos+6 > len(data) {
-			return nil, fmt.Errorf("Invalid ls-tree output: %s", string(data))
-		}
-		switch string(data[pos : pos+6]) {
-		case "100644":
-			entry.gogitTreeEntry.Mode = filemode.Regular
-			pos += 12 // skip over "100644 blob "
-		case "100755":
-			entry.gogitTreeEntry.Mode = filemode.Executable
-			pos += 12 // skip over "100755 blob "
-		case "120000":
-			entry.gogitTreeEntry.Mode = filemode.Symlink
-			pos += 12 // skip over "120000 blob "
-		case "160000":
-			entry.gogitTreeEntry.Mode = filemode.Submodule
-			pos += 14 // skip over "160000 object "
-		case "040000":
-			entry.gogitTreeEntry.Mode = filemode.Dir
-			pos += 12 // skip over "040000 tree "
-		default:
-			return nil, fmt.Errorf("unknown type: %v", string(data[pos:pos+6]))
-		}
+func parseLsTreeLine(line []byte) (*LsTreeEntry, error) {
+	// expect line to be of the form:
+	// <mode> <type> <sha> <space-padded-size>\t<filename>
+	// <mode> <type> <sha>\t<filename>
 
-		if pos+40 > len(data) {
-			return nil, fmt.Errorf("Invalid ls-tree output: %s", string(data))
-		}
-		id, err := NewIDFromString(string(data[pos : pos+40]))
-		if err != nil {
-			return nil, fmt.Errorf("Invalid ls-tree output: %v", err)
-		}
-		entry.ID = id
-		entry.gogitTreeEntry.Hash = id
-		pos += 41 // skip over sha and trailing space
-
-		end := pos + bytes.IndexByte(data[pos:], '\n')
-		if end < pos {
-			return nil, fmt.Errorf("Invalid ls-tree output: %s", string(data))
-		}
-
-		// In case entry name is surrounded by double quotes(it happens only in git-shell).
-		if data[pos] == '"' {
-			entry.gogitTreeEntry.Name, err = strconv.Unquote(string(data[pos:end]))
-			if err != nil {
-				return nil, fmt.Errorf("Invalid ls-tree output: %v", err)
-			}
-		} else {
-			entry.gogitTreeEntry.Name = string(data[pos:end])
-		}
-
-		pos = end + 1
-		entries = append(entries, entry)
+	var err error
+	before, after, ok := bytes.Cut(line, []byte{'\t'})
+	if !ok {
+		return nil, fmt.Errorf("invalid ls-tree output (no tab): %q", line)
 	}
-	return entries, nil
+
+	entry := new(LsTreeEntry)
+
+	entryAttrs := before
+	entryName := after
+
+	entryMode, entryAttrs, _ := bytes.Cut(entryAttrs, sepSpace)
+	_ /* entryType */, entryAttrs, _ = bytes.Cut(entryAttrs, sepSpace) // the type is not used, the mode is enough to determine the type
+	entryObjectID, entryAttrs, _ := bytes.Cut(entryAttrs, sepSpace)
+	if len(entryAttrs) > 0 {
+		entrySize := entryAttrs // the last field is the space-padded-size
+		size, _ := strconv.ParseInt(strings.TrimSpace(string(entrySize)), 10, 64)
+		entry.Size = optional.Some(size)
+	}
+
+	entry.EntryMode = ParseEntryMode(string(entryMode))
+	if entry.EntryMode == EntryModeNoEntry {
+		return nil, fmt.Errorf("invalid ls-tree output (invalid mode): %q, err: %w", line, err)
+	}
+
+	entry.ID, err = NewIDFromString(string(entryObjectID))
+	if err != nil {
+		return nil, fmt.Errorf("invalid ls-tree output (invalid object id): %q, err: %w", line, err)
+	}
+
+	entry.Name, err = UnquoteDiffFilePath(string(entryName))
+	if err != nil {
+		return nil, fmt.Errorf("invalid ls-tree output (invalid name): %q, err: %w", line, err)
+	}
+	return entry, nil
+}
+
+func UnquoteDiffFilePath(path string) (string, error) {
+	// ref: see the document of git config's "core.quotepath"
+	if !strings.HasPrefix(path, `"`) {
+		return path, nil
+	}
+	return strconv.Unquote(path)
 }

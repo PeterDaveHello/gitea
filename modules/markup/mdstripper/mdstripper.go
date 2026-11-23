@@ -1,20 +1,18 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package mdstripper
 
 import (
 	"bytes"
+	"io"
 	"net/url"
 	"strings"
 	"sync"
 
-	"io"
-
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/markup/common"
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/markup/common"
+	"gitea.dev/modules/setting"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
@@ -48,7 +46,7 @@ func (r *stripRenderer) Render(w io.Writer, source []byte, doc ast.Node) error {
 				coalesce := prevSibIsText
 				r.processString(
 					w,
-					v.Text(source),
+					v.Value(source),
 					coalesce)
 				if v.SoftLineBreak() {
 					r.doubleSpace(w)
@@ -56,7 +54,7 @@ func (r *stripRenderer) Render(w io.Writer, source []byte, doc ast.Node) error {
 			}
 			return ast.WalkContinue, nil
 		case *ast.Link:
-			r.processLink(w, v.Destination)
+			r.processLink(v.Destination)
 			return ast.WalkSkipChildren, nil
 		case *ast.AutoLink:
 			// This could be a reference to an issue or pull - if so convert it
@@ -93,8 +91,7 @@ func (r *stripRenderer) processAutoLink(w io.Writer, link []byte) {
 	}
 
 	// Note: we're not attempting to match the URL scheme (http/https)
-	host := strings.ToLower(u.Host)
-	if host != "" && host != strings.ToLower(r.localhost.Host) {
+	if u.Host != "" && !strings.EqualFold(u.Host, r.localhost.Host) {
 		// Process out of band
 		r.links = append(r.links, linkStr)
 		return
@@ -109,11 +106,12 @@ func (r *stripRenderer) processAutoLink(w io.Writer, link []byte) {
 	}
 
 	var sep string
-	if parts[3] == "issues" {
+	switch parts[3] {
+	case "issues":
 		sep = "#"
-	} else if parts[3] == "pulls" {
+	case "pulls":
 		sep = "!"
-	} else {
+	default:
 		// Process out of band
 		r.links = append(r.links, linkStr)
 		return
@@ -126,7 +124,7 @@ func (r *stripRenderer) processAutoLink(w io.Writer, link []byte) {
 	_, _ = w.Write([]byte(parts[4]))
 }
 
-func (r *stripRenderer) processLink(w io.Writer, link []byte) {
+func (r *stripRenderer) processLink(link []byte) {
 	// Links are processed out of band
 	r.links = append(r.links, string(link))
 }
@@ -142,17 +140,19 @@ func (r *stripRenderer) AddOptions(...renderer.Option) {
 }
 
 // StripMarkdown parses markdown content by removing all markup and code blocks
-//	in order to extract links and other references
+// in order to extract links and other references
 func StripMarkdown(rawBytes []byte) (string, []string) {
 	buf, links := StripMarkdownBytes(rawBytes)
 	return string(buf), links
 }
 
-var stripParser parser.Parser
-var once = sync.Once{}
+var (
+	stripParser parser.Parser
+	once        = sync.Once{}
+)
 
 // StripMarkdownBytes parses markdown content by removing all markup and code blocks
-//	in order to extract links and other references
+// in order to extract links and other references
 func StripMarkdownBytes(rawBytes []byte) ([]byte, []string) {
 	once.Do(func() {
 		gdMarkdown := goldmark.New(
@@ -165,7 +165,6 @@ func StripMarkdownBytes(rawBytes []byte) ([]byte, []string) {
 			),
 			goldmark.WithParserOptions(
 				parser.WithAttribute(),
-				parser.WithAutoHeadingID(),
 			),
 			goldmark.WithRendererOptions(
 				html.WithUnsafe(),

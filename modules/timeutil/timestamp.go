@@ -1,20 +1,41 @@
 // Copyright 2017 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package timeutil
 
 import (
 	"time"
 
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/modules/setting"
 )
 
 // TimeStamp defines a timestamp
 type TimeStamp int64
 
+var (
+	// mockNow is NOT concurrency-safe!!
+	mockNow time.Time
+
+	// Used for IsZero, to check if timestamp is the zero time instant.
+	timeZeroUnix = time.Time{}.Unix()
+)
+
+// MockSet sets the time to a mocked time.Time
+func MockSet(now time.Time) func() {
+	mockNow = now
+	return MockUnset
+}
+
+// MockUnset will unset the mocked time.Time
+func MockUnset() {
+	mockNow = time.Time{}
+}
+
 // TimeStampNow returns now int64
 func TimeStampNow() TimeStamp {
+	if !mockNow.IsZero() {
+		return TimeStamp(mockNow.Unix())
+	}
 	return TimeStamp(time.Now().Unix())
 }
 
@@ -38,10 +59,14 @@ func (ts TimeStamp) AsTime() (tm time.Time) {
 	return ts.AsTimeInLocation(setting.DefaultUILocation)
 }
 
+// AsLocalTime convert timestamp as time.Time in local location
+func (ts TimeStamp) AsLocalTime() time.Time {
+	return time.Unix(int64(ts), 0)
+}
+
 // AsTimeInLocation convert timestamp as time.Time in Local locale
-func (ts TimeStamp) AsTimeInLocation(loc *time.Location) (tm time.Time) {
-	tm = time.Unix(int64(ts), 0).In(loc)
-	return
+func (ts TimeStamp) AsTimeInLocation(loc *time.Location) time.Time {
+	return time.Unix(int64(ts), 0).In(loc)
 }
 
 // AsTimePtr convert timestamp as *time.Time in Local locale
@@ -65,22 +90,12 @@ func (ts TimeStamp) FormatInLocation(f string, loc *time.Location) string {
 	return ts.AsTimeInLocation(loc).Format(f)
 }
 
-// FormatLong formats as RFC1123Z
-func (ts TimeStamp) FormatLong() string {
-	return ts.Format(time.RFC1123Z)
-}
-
-// FormatShort formats as short
-func (ts TimeStamp) FormatShort() string {
-	return ts.Format("Jan 02, 2006")
-}
-
-// FormatDate formats a date in YYYY-MM-DD server time zone
+// FormatDate formats a date in YYYY-MM-DD
 func (ts TimeStamp) FormatDate() string {
-	return time.Unix(int64(ts), 0).String()[:10]
+	return ts.Format("2006-01-02")
 }
 
 // IsZero is zero time
 func (ts TimeStamp) IsZero() bool {
-	return ts.AsTimeInLocation(time.Local).IsZero()
+	return int64(ts) == 0 || int64(ts) == timeZeroUnix
 }

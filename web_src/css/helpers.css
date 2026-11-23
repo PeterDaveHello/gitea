@@ -1,0 +1,98 @@
+/*
+Gitea's tailwind-style CSS helper classes have `gt-` prefix.
+Gitea's private styles use `g-` prefix.
+*/
+
+.gt-ellipsis {
+  overflow: hidden !important;
+  white-space: nowrap !important;
+  text-overflow: ellipsis !important;
+}
+
+.g-table-auto-ellipsis td.auto-ellipsis {
+  position: relative;
+}
+
+.g-table-auto-ellipsis td.auto-ellipsis span {
+  position: absolute;
+  inset: 0;
+  padding: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* interact-xx classes can be used standalone, reset the <a> and <button> styles to default text styles */
+.interact-fg, .interact-bg, .interact-link {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  text-align: left;
+  line-height: inherit;
+  margin: 0;
+  padding: 0;
+}
+
+.interact-fg { color: inherit !important; }
+.interact-fg:hover { color: var(--color-primary) !important; }
+.interact-fg:active { color: var(--color-primary-active) !important; }
+.interact-fg.disabled:hover { color: inherit !important; }
+
+.interact-bg { background: transparent !important; }
+.interact-bg:hover { background: var(--color-hover) !important; }
+.interact-bg:active { background: var(--color-active) !important; }
+
+/* sometimes, we'd like to make "<button>" look like a link */
+.interact-link { color: var(--color-primary); }
+.interact-link:hover { text-decoration: underline; }
+
+.interact-danger:hover { color: var(--color-danger) !important; }
+
+/* primary-color dot centered on the top-right corner of the element */
+.indicator-dot {
+  position: relative;
+}
+
+.indicator-dot::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  border: 1px solid var(--color-secondary);
+  transform: translate(50%, -50%);
+}
+
+@media (max-width: 767.98px) {
+  /* double selector so it wins over .tw-flex (old .gt-df) etc */
+  .not-mobile.not-mobile {
+    display: none !important;
+  }
+}
+@media (min-width: 767.98px) {
+  .only-mobile.only-mobile {
+    display: none !important;
+  }
+}
+
+.tab-size-1 { tab-size: 1 !important; }
+.tab-size-2 { tab-size: 2 !important; }
+.tab-size-3 { tab-size: 3 !important; }
+.tab-size-4 { tab-size: 4 !important; }
+.tab-size-5 { tab-size: 5 !important; }
+.tab-size-6 { tab-size: 6 !important; }
+.tab-size-7 { tab-size: 7 !important; }
+.tab-size-8 { tab-size: 8 !important; }
+.tab-size-9 { tab-size: 9 !important; }
+.tab-size-10 { tab-size: 10 !important; }
+.tab-size-11 { tab-size: 11 !important; }
+.tab-size-12 { tab-size: 12 !important; }
+.tab-size-13 { tab-size: 13 !important; }
+.tab-size-14 { tab-size: 14 !important; }
+.tab-size-15 { tab-size: 15 !important; }
+.tab-size-16 { tab-size: 16 !important; }

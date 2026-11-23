@@ -1,6 +1,5 @@
-// Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// Copyright 2024 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
 
 package git
 
@@ -10,22 +9,23 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestRefEndName(t *testing.T) {
-	// Test branch names (with and without slash).
-	assert.Equal(t, "foo", RefEndName("refs/heads/foo"))
-	assert.Equal(t, "feature/foo", RefEndName("refs/heads/feature/foo"))
-
-	// Test tag names (with and without slash).
-	assert.Equal(t, "foo", RefEndName("refs/tags/foo"))
-	assert.Equal(t, "release/foo", RefEndName("refs/tags/release/foo"))
-
-	// Test commit hashes.
-	assert.Equal(t, "c0ffee", RefEndName("c0ffee"))
+func TestHashFilePathForWebUI(t *testing.T) {
+	assert.Equal(t,
+		"8843d7f92416211de9ebb963ff4ce28125932878",
+		HashFilePathForWebUI("foobar"),
+	)
 }
 
-func TestRefURL(t *testing.T) {
-	repoURL := "/user/repo"
-	assert.Equal(t, repoURL+"/src/branch/foo", RefURL(repoURL, "refs/heads/foo"))
-	assert.Equal(t, repoURL+"/src/tag/foo", RefURL(repoURL, "refs/tags/foo"))
-	assert.Equal(t, repoURL+"/src/commit/c0ffee", RefURL(repoURL, "c0ffee"))
+func TestSplitCommitTitleBody(t *testing.T) {
+	title, body := SplitCommitTitleBody("啊bcdefg", 4)
+	assert.Equal(t, "啊…", title)
+	assert.Equal(t, "…bcdefg", body)
+
+	title, body = SplitCommitTitleBody("abcdefg\n1234567", 4)
+	assert.Equal(t, "a…", title)
+	assert.Equal(t, "…bcdefg\n1234567", body)
+
+	title, body = SplitCommitTitleBody("abcdefg\n1234567", 100)
+	assert.Equal(t, "abcdefg", title)
+	assert.Equal(t, "1234567", body)
 }

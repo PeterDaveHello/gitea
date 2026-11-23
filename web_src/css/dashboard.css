@@ -1,0 +1,39 @@
+.dashboard.feeds .context.user.menu,
+.dashboard.issues .context.user.menu {
+  z-index: 101;
+  min-width: 200px;
+}
+
+.dashboard.issues .filter.menu {
+  width: initial;
+}
+
+.dashboard.issues .filter.menu .item {
+  text-align: left;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+@media (max-width: 767.98px) {
+  .dashboard.issues .filter.menu {
+    width: 100%;
+  }
+}
+
+.dashboard .dashboard-repos,
+.dashboard .dashboard-orgs {
+  margin: 0 1px; /* Accommodate for Semantic's 1px hacks on .attached elements */
+}
+
+.dashboard .secondary-nav {
+  padding: 1px 12px; /* match .overflow-menu-items in height */
+}
+
+.dashboard .secondary-nav .org-visibility .label {
+  margin-left: 5px;
+}
+
+.dashboard .secondary-nav .ui.dropdown {
+  max-width: 100%;
+}

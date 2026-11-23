@@ -1,85 +1,88 @@
-[简体中文](README_ZH.md)
+# Gitea
 
-<h1> <img src="https://raw.githubusercontent.com/go-gitea/gitea/master/public/img/gitea-192.png" alt="logo" width="30" height="30"> Gitea - Git with a cup of tea</h1>
+[![](https://github.com/go-gitea/gitea/actions/workflows/release-nightly.yml/badge.svg?branch=main)](https://github.com/go-gitea/gitea/actions/workflows/release-nightly.yml?query=branch%3Amain "Release Nightly")
+[![](https://img.shields.io/discord/322538954119184384.svg?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.gg/Gitea "Join the Discord chat at https://discord.gg/Gitea")
+[![](https://pkg.go.dev/badge/gitea.dev?status.svg)](https://pkg.go.dev/gitea.dev "GoDoc")
+[![](https://img.shields.io/github/release/go-gitea/gitea.svg)](https://github.com/go-gitea/gitea/releases/latest "GitHub release")
+[![](https://www.codetriage.com/go-gitea/gitea/badges/users.svg)](https://www.codetriage.com/go-gitea/gitea "Help Contribute to Open Source")
+[![](https://opencollective.com/gitea/tiers/backers/badge.svg?label=backers&color=brightgreen)](https://opencollective.com/gitea "Become a backer/sponsor of gitea")
+[![](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT "License: MIT")
+[![](https://badges.crowdin.net/gitea/localized.svg)](https://translate.gitea.com "Crowdin")
 
-[![Build Status](https://drone.gitea.io/api/badges/go-gitea/gitea/status.svg?ref=refs/heads/master)](https://drone.gitea.io/go-gitea/gitea)
-[![Join the Discord chat at https://discord.gg/Gitea](https://img.shields.io/discord/322538954119184384.svg)](https://discord.gg/Gitea)
-[![](https://images.microbadger.com/badges/image/gitea/gitea.svg)](https://microbadger.com/images/gitea/gitea "Get your own image badge on microbadger.com")
-[![codecov](https://codecov.io/gh/go-gitea/gitea/branch/master/graph/badge.svg)](https://codecov.io/gh/go-gitea/gitea)
-[![Go Report Card](https://goreportcard.com/badge/code.gitea.io/gitea)](https://goreportcard.com/report/code.gitea.io/gitea)
-[![GoDoc](https://godoc.org/code.gitea.io/gitea?status.svg)](https://godoc.org/code.gitea.io/gitea)
-[![GitHub release](https://img.shields.io/github/release/go-gitea/gitea.svg)](https://github.com/go-gitea/gitea/releases/latest)
-[![Help Contribute to Open Source](https://www.codetriage.com/go-gitea/gitea/badges/users.svg)](https://www.codetriage.com/go-gitea/gitea)
-[![Become a backer/sponsor of gitea](https://opencollective.com/gitea/tiers/backers/badge.svg?label=backers&color=brightgreen)](https://opencollective.com/gitea)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Crowdin](https://badges.crowdin.net/gitea/localized.svg)](https://crowdin.com/project/gitea)
-[![TODOs](https://badgen.net/https/api.tickgit.com/badgen/github.com/go-gitea/gitea)](https://www.tickgit.com/browse?repo=github.com/go-gitea/gitea)
+[繁體中文](./README.zh-tw.md) | [简体中文](./README.zh-cn.md)
 
 ## Purpose
 
-The goal of this project is to make the easiest, fastest, and most
-painless way of setting up a self-hosted Git service.
-Using Go, this can be done with an independent binary distribution across
-**all platforms** which Go supports, including Linux, macOS, and Windows
-on x86, amd64, ARM and PowerPC architectures.
-Want to try it before doing anything else?
-Do it [with the online demo](https://try.gitea.io/)!
-This project has been
-[forked](https://blog.gitea.io/2016/12/welcome-to-gitea/) from
-[Gogs](https://gogs.io) since 2016.11 but changed a lot.
+The goal of Gitea is to make the easiest, fastest, and most painless way of
+setting up a self-hosted all-in-one software development service,
+including Git hosting, code management, code review, issue tracking, project kanban, wiki,
+team collaboration, package registry and CI/CD which can reuse GitHub Actions.
+
+As Gitea is written in Go, it works across **all** the platforms and
+architectures that are supported by Go, including Linux, macOS, FreeBSD/OpenBSD and Windows
+on x86, amd64, ARM, RISC-V 64 and PowerPC architectures.
+
+For online demonstrations, you can visit [demo.gitea.com](https://demo.gitea.com).
+
+For accessing free Gitea service (with a limited number of repositories), you can visit [gitea.com](https://gitea.com/user/login).
+
+To quickly deploy your own dedicated Gitea instance on Gitea Cloud, you can start a free trial at [cloud.gitea.com](https://cloud.gitea.com),
+or use container (docker/podman/etc) to deploy on your own server with the [official image](https://hub.docker.com/r/gitea/gitea).
+
+## Documentation
+
+You can find comprehensive documentation on our official [documentation website](https://docs.gitea.com/).
+
+It includes installation, administration, usage, development, contributing guides, and more to help you get started and explore all features effectively.
+
+If you have any suggestions or would like to contribute to it, you can visit the [documentation repository](https://gitea.com/gitea/docs)
 
 ## Building
 
-From the root of the source tree, run:
+See [docs/build-setup.md](docs/build-setup.md) for prerequisites
+and [docs/development.md](docs/development.md) for setting up a local development environment, linting, and testing.
 
-    TAGS="bindata" make build
+If you'd like to build from source or make a distribution package, see [docs/build-source.md](docs/build-source.md) for more information.
 
-or if sqlite support is required:
-
-    TAGS="bindata sqlite sqlite_unlock_notify" make build
-
-The `build` target is split into two sub-targets:
-
-- `make backend` which requires [Go 1.12](https://golang.org/dl/) or greater.
-- `make frontend` which requires [Node.js 10.13](https://nodejs.org/en/download/) or greater.
-
-If pre-built frontend files are present it is possible to only build the backend:
-
-		TAGS="bindata" make backend
-
-Parallelism is not supported for these targets, so please don't include `-j <num>`.
-
-More info: https://docs.gitea.io/en-us/install-from-source/
-
-## Using
-
-    ./gitea web
-
-NOTE: If you're interested in using our APIs, we have experimental
-support with [documentation](https://try.gitea.io/api/swagger).
+After building, you can run `./gitea web` to start the server, or `./gitea help` to see all available commands.
 
 ## Contributing
 
 Expected workflow is: Fork -> Patch -> Push -> Pull Request
 
-NOTES:
+> [!NOTE]
+>
+> 1. **YOU MUST READ THE [CONTRIBUTORS GUIDE](CONTRIBUTING.md) BEFORE STARTING TO WORK ON A PULL REQUEST.**
+> 2. New to the codebase? The [development guide](docs/development.md) walks through setting up a local environment and building from source.
+> 3. If you have found a vulnerability in the project, please write privately to **security@gitea.io**. Thanks!
 
-1. **YOU MUST READ THE [CONTRIBUTORS GUIDE](CONTRIBUTING.md) BEFORE STARTING TO WORK ON A PULL REQUEST.**
-2. If you have found a vulnerability in the project, please write privately to **security@gitea.io**. Thanks!
+## Translating
 
-## Further information
+[![Crowdin](https://badges.crowdin.net/gitea/localized.svg)](https://translate.gitea.com)
 
-For more information and instructions about how to install Gitea, please look
-at our [documentation](https://docs.gitea.io/en-us/). If you have questions
-that are not covered by the documentation, you can get in contact with us on
-our [Discord server](https://discord.gg/Gitea),
-or [forum](https://discourse.gitea.io/)!
+Translations are done through [Crowdin](https://translate.gitea.com). If you want to translate to a new language, ask one of the managers in the Crowdin project to add a new language there.
+
+You can also just create an issue for adding a language or ask on Discord on the #translation channel. If you need context or find some translation issues, you can leave a comment on the string or ask on Discord.
+
+Get more information from [the translation section of our contributing guide](CONTRIBUTING.md#translation).
+
+## Official and Third-Party Projects
+
+We provide an official [go-sdk](https://gitea.com/gitea/go-sdk), a CLI tool called [gt](https://gitea.com/gitea/cli) and an [action runner](https://gitea.com/gitea/runner) for Gitea Action.
+
+We maintain a list of Gitea-related projects at [gitea/awesome-gitea](https://gitea.com/gitea/awesome-gitea), where you can discover more third-party projects, including SDKs, plugins, themes, and more.
+
+## Communication
+
+[![](https://img.shields.io/discord/322538954119184384.svg?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.gg/Gitea "Join the Discord chat at https://discord.gg/Gitea")
+
+If you have questions that are not covered by the [documentation](https://docs.gitea.com/), you can get in contact with us on our [Discord server](https://discord.gg/Gitea) or create a post in the [discourse forum](https://forum.gitea.com/).
 
 ## Authors
 
-* [Maintainers](https://github.com/orgs/go-gitea/people)
-* [Contributors](https://github.com/go-gitea/gitea/graphs/contributors)
-* [Translators](options/locale/TRANSLATORS)
+- [Maintainers](https://github.com/orgs/go-gitea/people)
+- [Contributors](https://github.com/go-gitea/gitea/graphs/contributors)
+- [Translators](options/locale/TRANSLATORS)
 
 ## Backers
 
@@ -108,21 +111,88 @@ Support this project by becoming a sponsor. Your logo will show up here with a l
 
 Gitea is pronounced [/ɡɪ’ti:/](https://youtu.be/EM71-2uDAoY) as in "gi-tea" with a hard g.
 
-**Why is this not hosted on a Gitea instance?**
+**How do I configure Gitea?**
 
-We're [working on it](https://github.com/go-gitea/gitea/issues/1029).
+For dynamic config options, you can change it on your admin panel's configuration section.
+
+For static config options, you can edit your `app.ini` file and restart the instance.
+See [app.example.ini](https://github.com/go-gitea/gitea/blob/main/custom/conf/app.example.ini) or [configuration documentation](https://docs.gitea.com/administration/config-cheat-sheet) for more details.
+
+**Where can I find the security patches?**
+
+Check the [release notes](https://github.com/go-gitea/gitea/releases) and [security advisories](https://github.com/go-gitea/gitea/security/advisories) for security patches.
+
+(more FAQs are listed in [FAQ documentation](https://docs.gitea.com/help/faq))
 
 ## License
 
 This project is licensed under the MIT License.
-See the [LICENSE](https://github.com/go-gitea/gitea/blob/master/LICENSE) file
+See the [LICENSE](https://github.com/go-gitea/gitea/blob/main/LICENSE) file
 for the full license text.
 
-## Screenshots
-Looking for an overview of the interface? Check it out!
+## Further information
 
-|![Dashboard](https://dl.gitea.io/screenshots/home_timeline.png)|![User Profile](https://dl.gitea.io/screenshots/user_profile.png)|![Global Issues](https://dl.gitea.io/screenshots/global_issues.png)|
-|:---:|:---:|:---:|
-|![Branches](https://dl.gitea.io/screenshots/branches.png)|![Web Editor](https://dl.gitea.io/screenshots/web_editor.png)|![Activity](https://dl.gitea.io/screenshots/activity.png)|
-|![New Migration](https://dl.gitea.io/screenshots/migration.png)|![Migrating](https://dl.gitea.io/screenshots/migration.gif)|![Pull Request View](https://image.ibb.co/e02dSb/6.png)
-![Pull Request Dark](https://dl.gitea.io/screenshots/pull_requests_dark.png)|![Diff Review Dark](https://dl.gitea.io/screenshots/review_dark.png)|![Diff Dark](https://dl.gitea.io/screenshots/diff_dark.png)|
+<details>
+<summary>Looking for an overview of the interface? Check it out the screenshots!</summary>
+
+### Login/Register Page
+
+![Login](https://dl.gitea.com/screenshots/login.png)
+![Register](https://dl.gitea.com/screenshots/register.png)
+
+### User Dashboard
+
+![Home](https://dl.gitea.com/screenshots/home.png)
+![Issues](https://dl.gitea.com/screenshots/issues.png)
+![Pull Requests](https://dl.gitea.com/screenshots/pull_requests.png)
+![Milestones](https://dl.gitea.com/screenshots/milestones.png)
+
+### User Profile
+
+![Profile](https://dl.gitea.com/screenshots/user_profile.png)
+
+### Explore
+
+![Repos](https://dl.gitea.com/screenshots/explore_repos.png)
+![Users](https://dl.gitea.com/screenshots/explore_users.png)
+![Orgs](https://dl.gitea.com/screenshots/explore_orgs.png)
+
+### Repository
+
+![Home](https://dl.gitea.com/screenshots/repo_home.png)
+![Commits](https://dl.gitea.com/screenshots/repo_commits.png)
+![Branches](https://dl.gitea.com/screenshots/repo_branches.png)
+![Labels](https://dl.gitea.com/screenshots/repo_labels.png)
+![Milestones](https://dl.gitea.com/screenshots/repo_milestones.png)
+![Releases](https://dl.gitea.com/screenshots/repo_releases.png)
+![Tags](https://dl.gitea.com/screenshots/repo_tags.png)
+
+#### Repository Issue
+
+![List](https://dl.gitea.com/screenshots/repo_issues.png)
+![Issue](https://dl.gitea.com/screenshots/repo_issue.png)
+
+#### Repository Pull Requests
+
+![List](https://dl.gitea.com/screenshots/repo_pull_requests.png)
+![Pull Request](https://dl.gitea.com/screenshots/repo_pull_request.png)
+![File](https://dl.gitea.com/screenshots/repo_pull_request_file.png)
+![Commits](https://dl.gitea.com/screenshots/repo_pull_request_commits.png)
+
+#### Repository Actions
+
+![List](https://dl.gitea.com/screenshots/repo_actions.png)
+![Details](https://dl.gitea.com/screenshots/repo_actions_run.png)
+
+#### Repository Activity
+
+![Activity](https://dl.gitea.com/screenshots/repo_activity.png)
+![Contributors](https://dl.gitea.com/screenshots/repo_contributors.png)
+![Code Frequency](https://dl.gitea.com/screenshots/repo_code_frequency.png)
+![Recent Commits](https://dl.gitea.com/screenshots/repo_recent_commits.png)
+
+### Organization
+
+![Home](https://dl.gitea.com/screenshots/org_home.png)
+
+</details>

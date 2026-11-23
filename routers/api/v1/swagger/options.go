@@ -1,19 +1,19 @@
 // Copyright 2017 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package swagger
 
 import (
-	"code.gitea.io/gitea/modules/auth"
-	api "code.gitea.io/gitea/modules/structs"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/services/forms"
 )
 
-// not actually a response, just a hack to get go-swagger to include definitions
-// of the various XYZOption structs
+// not actually a set of parameters, just a hack to get go-swagger to include
+// definitions of the various XYZOption structs. The annotation below uses an
+// operation id that matches no route, so the spec carries no unused response
+// or parameter for it while still emitting the referenced definitions.
 
-// parameterBodies
-// swagger:response parameterBodies
+// swagger:parameters parameterBodies
 type swaggerParameterBodies struct {
 	// in:body
 	AddCollaboratorOption api.AddCollaboratorOption
@@ -37,11 +37,15 @@ type swaggerParameterBodies struct {
 	EditIssueOption api.EditIssueOption
 	// in:body
 	EditDeadlineOption api.EditDeadlineOption
+	// in:body
+	IssueAssigneesOption api.IssueAssigneesOption
 
 	// in:body
 	CreateIssueCommentOption api.CreateIssueCommentOption
 	// in:body
 	EditIssueCommentOption api.EditIssueCommentOption
+	// in:body
+	IssueMeta api.IssueMeta
 
 	// in:body
 	IssueLabelsOption api.IssueLabelsOption
@@ -50,10 +54,18 @@ type swaggerParameterBodies struct {
 	CreateKeyOption api.CreateKeyOption
 
 	// in:body
+	CreateDeployKeyTokenOption api.CreateDeployKeyTokenOption
+
+	// in:body
+	RenameUserOption api.RenameUserOption
+
+	// in:body
 	CreateLabelOption api.CreateLabelOption
 	// in:body
 	EditLabelOption api.EditLabelOption
 
+	// in:body
+	MarkupOption api.MarkupOption
 	// in:body
 	MarkdownOption api.MarkdownOption
 
@@ -72,7 +84,7 @@ type swaggerParameterBodies struct {
 	// in:body
 	EditPullRequestOption api.EditPullRequestOption
 	// in:body
-	MergePullRequestOption auth.MergePullRequestForm
+	MergePullRequestOption forms.MergePullRequestForm
 
 	// in:body
 	CreateReleaseOption api.CreateReleaseOption
@@ -84,9 +96,13 @@ type swaggerParameterBodies struct {
 	// in:body
 	EditRepoOption api.EditRepoOption
 	// in:body
+	RenameBranchRepoOption api.RenameBranchRepoOption
+	// in:body
 	TransferRepoOption api.TransferRepoOption
 	// in:body
 	CreateForkOption api.CreateForkOption
+	// in:body
+	GenerateRepoOption api.GenerateRepoOption
 
 	// in:body
 	CreateStatusOption api.CreateStatusOption
@@ -106,10 +122,16 @@ type swaggerParameterBodies struct {
 	EditUserOption api.EditUserOption
 
 	// in:body
-	MigrateRepoForm auth.MigrateRepoForm
+	EditAttachmentOptions api.EditAttachmentOptions
 
 	// in:body
-	EditAttachmentOptions api.EditAttachmentOptions
+	GetFilesOptions api.GetFilesOptions
+
+	// in:body
+	ApplyDiffPatchFileOptions api.ApplyDiffPatchFileOptions
+
+	// in:body
+	ChangeFilesOptions api.ChangeFilesOptions
 
 	// in:body
 	CreateFileOptions api.CreateFileOptions
@@ -131,12 +153,17 @@ type swaggerParameterBodies struct {
 
 	// in:body
 	CreateBranchRepoOption api.CreateBranchRepoOption
+	// in:body
+	UpdateBranchRepoOption api.UpdateBranchRepoOption
 
 	// in:body
 	CreateBranchProtectionOption api.CreateBranchProtectionOption
 
 	// in:body
 	EditBranchProtectionOption api.EditBranchProtectionOption
+
+	// in:body
+	UpdateBranchProtectionPriories api.UpdateBranchProtectionPriories
 
 	// in:body
 	CreateOAuth2ApplicationOptions api.CreateOAuth2ApplicationOptions
@@ -148,5 +175,93 @@ type swaggerParameterBodies struct {
 	CreatePullReviewComment api.CreatePullReviewComment
 
 	// in:body
+	CreatePullReviewCommentReplyOptions api.CreatePullReviewCommentReplyOptions
+
+	// in:body
 	SubmitPullReviewOptions api.SubmitPullReviewOptions
+
+	// in:body
+	DismissPullReviewOptions api.DismissPullReviewOptions
+
+	// in:body
+	MigrateRepoOptions api.MigrateRepoOptions
+
+	// in:body
+	PullReviewRequestOptions api.PullReviewRequestOptions
+
+	// in:body
+	CreateTagOption api.CreateTagOption
+
+	// in:body
+	CreateTagProtectionOption api.CreateTagProtectionOption
+
+	// in:body
+	EditTagProtectionOption api.EditTagProtectionOption
+
+	// in:body
+	CreateAccessTokenOption api.CreateAccessTokenOption
+
+	// in:body
+	UserSettingsOptions api.UserSettingsOptions
+
+	// in:body
+	CreateWikiPageOptions api.CreateWikiPageOptions
+
+	// in:body
+	CreatePushMirrorOption api.CreatePushMirrorOption
+
+	// in:body
+	UpdateUserAvatarOptions api.UpdateUserAvatarOption
+
+	// in:body
+	UpdateRepoAvatarOptions api.UpdateRepoAvatarOption
+
+	// in:body
+	CreateOrUpdateSecretOption api.CreateOrUpdateSecretOption
+
+	// in:body
+	UserBadgeOption api.UserBadgeOption
+
+	// in:body
+	CreateVariableOption api.CreateVariableOption
+
+	// in:body
+	RenameOrgOption api.RenameOrgOption
+
+	// in:body
+	CreateActionWorkflowDispatch api.CreateActionWorkflowDispatch
+
+	// in:body
+	UpdateVariableOption api.UpdateVariableOption
+
+	// in:body
+	EditActionRunnerOption api.EditActionRunnerOption
+
+	// in:body
+	LockIssueOption api.LockIssueOption
+
+	// in:body
+	CreateProjectOption api.CreateProjectOption
+	// in:body
+	EditProjectOption api.EditProjectOption
+
+	// in:body
+	CreateProjectColumnOption api.CreateProjectColumnOption
+	// in:body
+	EditProjectColumnOption api.EditProjectColumnOption
+
+	// in:body
+	MoveProjectColumnsOption api.MoveProjectColumnsOption
+
+	// in:body
+	MoveProjectIssueOption api.MoveProjectIssueOption
+
+	// in:body
+	CreateProjectWorkflowOption api.CreateProjectWorkflowOption
+
+	// in:body
+	EditProjectWorkflowOption api.EditProjectWorkflowOption
+
+	// in:body
+	MergeUpstreamRequest api.MergeUpstreamRequest
 }

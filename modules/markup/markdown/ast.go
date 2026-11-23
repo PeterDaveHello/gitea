@@ -1,11 +1,10 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package markdown
 
 import (
-	"strconv"
+	"html/template"
 
 	"github.com/yuin/goldmark/ast"
 )
@@ -30,16 +29,7 @@ func (n *Details) Kind() ast.NodeKind {
 
 // NewDetails returns a new Paragraph node.
 func NewDetails() *Details {
-	return &Details{
-		BaseBlock: ast.BaseBlock{},
-	}
-}
-
-// IsDetails returns true if the given node implements the Details interface,
-// otherwise false.
-func IsDetails(node ast.Node) bool {
-	_, ok := node.(*Details)
-	return ok
+	return &Details{}
 }
 
 // Summary is a block that contains the summary of details block
@@ -62,85 +52,101 @@ func (n *Summary) Kind() ast.NodeKind {
 
 // NewSummary returns a new Summary node.
 func NewSummary() *Summary {
-	return &Summary{
-		BaseBlock: ast.BaseBlock{},
-	}
+	return &Summary{}
 }
 
-// IsSummary returns true if the given node implements the Summary interface,
-// otherwise false.
-func IsSummary(node ast.Node) bool {
-	_, ok := node.(*Summary)
-	return ok
-}
-
-// TaskCheckBoxListItem is a block that repressents a list item of a markdown block with a checkbox
-type TaskCheckBoxListItem struct {
-	*ast.ListItem
-	IsChecked bool
-}
-
-// KindTaskCheckBoxListItem is the NodeKind for TaskCheckBoxListItem
-var KindTaskCheckBoxListItem = ast.NewNodeKind("TaskCheckBoxListItem")
-
-// Dump implements Node.Dump .
-func (n *TaskCheckBoxListItem) Dump(source []byte, level int) {
-	m := map[string]string{}
-	m["IsChecked"] = strconv.FormatBool(n.IsChecked)
-	ast.DumpHelper(n, source, level, m, nil)
-}
-
-// Kind implements Node.Kind.
-func (n *TaskCheckBoxListItem) Kind() ast.NodeKind {
-	return KindTaskCheckBoxListItem
-}
-
-// NewTaskCheckBoxListItem returns a new TaskCheckBoxListItem node.
-func NewTaskCheckBoxListItem(listItem *ast.ListItem) *TaskCheckBoxListItem {
-	return &TaskCheckBoxListItem{
-		ListItem: listItem,
-	}
-}
-
-// IsTaskCheckBoxListItem returns true if the given node implements the TaskCheckBoxListItem interface,
-// otherwise false.
-func IsTaskCheckBoxListItem(node ast.Node) bool {
-	_, ok := node.(*TaskCheckBoxListItem)
-	return ok
-}
-
-// Icon is an inline for a fomantic icon
+// Icon is an inline for a Fomantic UI icon
 type Icon struct {
 	ast.BaseInline
 	Name []byte
 }
 
-// Dump implements Node.Dump .
-func (n *Icon) Dump(source []byte, level int) {
+// ColorPreview is an inline for a color preview
+type ColorPreview struct {
+	ast.BaseInline
+	Color string
+}
+
+// Dump implements Node.Dump.
+func (n *ColorPreview) Dump(source []byte, level int) {
 	m := map[string]string{}
-	m["Name"] = string(n.Name)
+	m["Color"] = n.Color
 	ast.DumpHelper(n, source, level, m, nil)
 }
 
-// KindIcon is the NodeKind for Icon
-var KindIcon = ast.NewNodeKind("Icon")
+// KindColorPreview is the NodeKind for ColorPreview
+var KindColorPreview = ast.NewNodeKind("ColorPreview")
 
 // Kind implements Node.Kind.
-func (n *Icon) Kind() ast.NodeKind {
-	return KindIcon
+func (n *ColorPreview) Kind() ast.NodeKind {
+	return KindColorPreview
 }
 
-// NewIcon returns a new Paragraph node.
-func NewIcon(name string) *Icon {
-	return &Icon{
+// NewColorPreview returns a new Span node.
+func NewColorPreview(color string) *ColorPreview {
+	return &ColorPreview{
 		BaseInline: ast.BaseInline{},
-		Name:       []byte(name),
+		Color:      color,
 	}
 }
 
-// IsIcon returns true if the given node implements the Icon interface,
-// otherwise false.
-func IsIcon(node ast.Node) bool {
-	_, ok := node.(*Icon)
-	return ok
+// Attention is an inline for an attention
+type Attention struct {
+	ast.BaseInline
+	AttentionType string
+}
+
+// Dump implements Node.Dump.
+func (n *Attention) Dump(source []byte, level int) {
+	m := map[string]string{}
+	m["AttentionType"] = n.AttentionType
+	ast.DumpHelper(n, source, level, m, nil)
+}
+
+// KindAttention is the NodeKind for Attention
+var KindAttention = ast.NewNodeKind("Attention")
+
+// Kind implements Node.Kind.
+func (n *Attention) Kind() ast.NodeKind {
+	return KindAttention
+}
+
+// NewAttention returns a new Attention node.
+func NewAttention(attentionType string) *Attention {
+	return &Attention{
+		BaseInline:    ast.BaseInline{},
+		AttentionType: attentionType,
+	}
+}
+
+var KindRawHTML = ast.NewNodeKind("RawHTML")
+
+type RawHTML struct {
+	ast.BaseBlock
+	rawHTML template.HTML
+}
+
+func (n *RawHTML) Dump(source []byte, level int) {
+	m := map[string]string{}
+	m["RawHTML"] = string(n.rawHTML)
+	ast.DumpHelper(n, source, level, m, nil)
+}
+
+func (n *RawHTML) Kind() ast.NodeKind {
+	return KindRawHTML
+}
+
+func NewRawHTML(rawHTML template.HTML) *RawHTML {
+	return &RawHTML{rawHTML: rawHTML}
+}
+
+func childSingleText(node ast.Node, source []byte) (string, bool) {
+	if node.FirstChild() == nil || node.FirstChild() != node.LastChild() {
+		return "", false
+	}
+	c, ok := node.FirstChild().(*ast.Text)
+	if !ok {
+		return "", false
+	}
+	return string(c.Segment.Value(source)), true
 }

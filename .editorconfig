@@ -1,25 +1,30 @@
 root = true
 
 [*]
-charset = utf-8
-insert_final_newline = true
-trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+tab_width = 2
 end_of_line = lf
-
-[*.md]
-trim_trailing_whitespace = false
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
 
 [*.{go,tmpl,html}]
 indent_style = tab
-indent_size = 4
 
-[*.{less,css}]
-indent_style = space
-indent_size = 4
+[go.*]
+indent_style = tab
 
-[*.{js,json,yml}]
+[templates/custom/*.tmpl]
+insert_final_newline = false
+
+[templates/swagger/*.generated.json]
 indent_style = space
-indent_size = 2
+insert_final_newline = false
+
+[templates/shared/actions/runner_badge_*.tmpl]
+# editconfig lint requires these XML-like files to have charset defined, but the files don't have.
+charset = unset
 
 [Makefile]
 indent_style = tab

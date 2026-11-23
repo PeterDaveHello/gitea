@@ -1,61 +1,60 @@
 {{template "base/head" .}}
-<div class="repository new milestone">
+<div role="main" aria-label="{{.Title}}" class="page-content repository new milestone">
 	{{template "repo/header" .}}
 	<div class="ui container">
-		<div class="navbar">
+		<div class="issue-navbar">
 			{{template "repo/issue/navbar" .}}
 			{{if and (or .CanWriteIssues .CanWritePulls) .PageIsEditMilestone}}
-				<div class="ui right floated secondary menu">
-					<a class="ui green button" href="{{$.RepoLink}}/milestones/new">{{.i18n.Tr "repo.milestones.new"}}</a>
+				<div class="ui right">
+					<a class="ui primary button" href="{{$.RepoLink}}/milestones/new">{{ctx.Locale.Tr "repo.milestones.new"}}</a>
 				</div>
 			{{end}}
 		</div>
-		<div class="ui divider"></div>
+		<div class="divider"></div>
 		<h2 class="ui dividing header">
 			{{if .PageIsEditMilestone}}
-				{{.i18n.Tr "repo.milestones.edit"}}
-				<div class="sub header">{{.i18n.Tr "repo.milestones.edit_subheader"}}</div>
+				{{ctx.Locale.Tr "repo.milestones.edit"}}
+				<div class="sub header">{{ctx.Locale.Tr "repo.milestones.edit_subheader"}}</div>
 			{{else}}
-				{{.i18n.Tr "repo.milestones.new"}}
-				<div class="sub header">{{.i18n.Tr "repo.milestones.new_subheader"}}</div>
+				{{ctx.Locale.Tr "repo.milestones.new"}}
+				<div class="sub header">{{ctx.Locale.Tr "repo.milestones.new_subheader"}}</div>
 			{{end}}
 		</h2>
 		{{template "base/alert" .}}
-		<form class="ui form grid" action="{{.Link}}" method="post">
-			{{.CsrfTokenHtml}}
-			<div class="twelve wide column">
+		<form class="ui form" action="{{.Link}}" method="post">
 				<div class="field {{if .Err_Title}}error{{end}}">
-					<label>{{.i18n.Tr "repo.milestones.title"}}</label>
-					<input name="title" placeholder="{{.i18n.Tr "repo.milestones.title"}}" value="{{.title}}" autofocus required maxlength="50">
+					<label>{{ctx.Locale.Tr "repo.milestones.title"}}</label>
+					<input name="title" placeholder="{{ctx.Locale.Tr "repo.milestones.title"}}" value="{{.title}}" autofocus required maxlength="50">
 				</div>
 				<div class="field {{if .Err_Deadline}}error{{end}}">
 					<label>
-						{{.i18n.Tr "repo.milestones.due_date"}}
-						<a id="clear-date">{{.i18n.Tr "repo.milestones.clear"}}</a>
+						{{ctx.Locale.Tr "repo.milestones.due_date"}}
+						<button type="button" class="interact-fg" id="milestone-clear-deadline">{{ctx.Locale.Tr "repo.milestones.clear"}}</button>
 					</label>
-					<input type="date" id="deadline" name="deadline" value="{{.deadline}}" placeholder="{{.i18n.Tr "repo.issues.due_date_form"}}">
+					<input type="date" name="deadline" class="tw-w-auto" value="{{.deadline}}" placeholder="{{ctx.Locale.Tr "repo.issues.due_date_form"}}">
 				</div>
 				<div class="field">
-					<label>{{.i18n.Tr "repo.milestones.desc"}}</label>
-					<textarea name="content">{{.content}}</textarea>
+					<label>{{ctx.Locale.Tr "repo.milestones.desc"}}</label>
+					{{template "shared/combomarkdowneditor" (dict
+						"MarkdownEditorContext" (ctx.MiscUtils.MarkdownEditorComment $.Repository)
+						"TextareaName" "content"
+						"TextareaContent" .content
+						"TextareaPlaceholder" (ctx.Locale.Tr "repo.milestones.desc")
+					)}}
 				</div>
-			</div>
-			<div class="ui container">
-				<div class="ui divider"></div>
-				<div class="ui right">
+				<div class="flex-text-block tw-justify-end">
 					{{if .PageIsEditMilestone}}
-						<a class="ui blue basic button" href="{{.RepoLink}}/milestones">
-							{{.i18n.Tr "repo.milestones.cancel"}}
+						<a class="ui primary basic button" href="{{.RepoLink}}/milestones">
+							{{ctx.Locale.Tr "repo.milestones.cancel"}}
 						</a>
-						<button class="ui green button">
-							{{.i18n.Tr "repo.milestones.modify"}}
+						<button type="submit" class="ui primary button">
+							{{ctx.Locale.Tr "repo.milestones.modify"}}
 						</button>
 					{{else}}
-						<button class="ui green button">
-							{{.i18n.Tr "repo.milestones.create"}}
+						<button type="submit" class="ui primary button">
+							{{ctx.Locale.Tr "repo.milestones.create"}}
 						</button>
 					{{end}}
-				</div>
 			</div>
 		</form>
 	</div>

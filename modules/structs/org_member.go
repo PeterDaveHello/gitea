@@ -1,10 +1,10 @@
 // Copyright 2016 The Gogs Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package structs
 
 // AddOrgMembershipOption add user to organization options
 type AddOrgMembershipOption struct {
+	// Role is the role to assign to the organization member
 	Role string `json:"role" binding:"Required"`
 }

@@ -1,271 +1,56 @@
 // Copyright 2016 The Gogs Authors. All rights reserved.
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package mailer
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"mime"
 	"regexp"
 	"strings"
-	texttmpl "text/template"
+	"sync"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/base"
-	"code.gitea.io/gitea/modules/emoji"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/markup"
-	"code.gitea.io/gitea/modules/markup/markdown"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/timeutil"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/httplib"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/storage"
+	"gitea.dev/modules/templates"
+	"gitea.dev/modules/typesniffer"
+	sender_service "gitea.dev/services/mailer/sender"
 
-	"gopkg.in/gomail.v2"
+	"golang.org/x/net/html"
 )
 
-const (
-	mailAuthActivate       base.TplName = "auth/activate"
-	mailAuthActivateEmail  base.TplName = "auth/activate_email"
-	mailAuthResetPassword  base.TplName = "auth/reset_passwd"
-	mailAuthRegisterNotify base.TplName = "auth/register_notify"
+const mailMaxSubjectRunes = 256 // There's no actual limit for subject in RFC 5322
 
-	mailNotifyCollaborator base.TplName = "notify/collaborator"
+var subjectRemoveSpaces = sync.OnceValue(func() *regexp.Regexp {
+	return regexp.MustCompile(`[\s]+`)
+})
 
-	// There's no actual limit for subject in RFC 5322
-	mailMaxSubjectRunes = 256
-)
-
-var (
-	bodyTemplates       *template.Template
-	subjectTemplates    *texttmpl.Template
-	subjectRemoveSpaces = regexp.MustCompile(`[\s]+`)
-)
-
-// InitMailRender initializes the mail renderer
-func InitMailRender(subjectTpl *texttmpl.Template, bodyTpl *template.Template) {
-	subjectTemplates = subjectTpl
-	bodyTemplates = bodyTpl
+func LoadedTemplates() *templates.MailRender {
+	return templates.MailRenderer()
 }
 
 // SendTestMail sends a test mail
 func SendTestMail(email string) error {
-	return gomail.Send(Sender, NewMessage([]string{email}, "Gitea Test Email!", "Gitea Test Email!").ToMessage())
-}
-
-// SendUserMail sends a mail to the user
-func SendUserMail(language string, u *models.User, tpl base.TplName, code, subject, info string) {
-	data := map[string]interface{}{
-		"DisplayName":       u.DisplayName(),
-		"ActiveCodeLives":   timeutil.MinutesToFriendly(setting.Service.ActiveCodeLives, language),
-		"ResetPwdCodeLives": timeutil.MinutesToFriendly(setting.Service.ResetPwdCodeLives, language),
-		"Code":              code,
-	}
-
-	var content bytes.Buffer
-
-	if err := bodyTemplates.ExecuteTemplate(&content, string(tpl), data); err != nil {
-		log.Error("Template: %v", err)
-		return
-	}
-
-	msg := NewMessage([]string{u.Email}, subject, content.String())
-	msg.Info = fmt.Sprintf("UID: %d, %s", u.ID, info)
-
-	SendAsync(msg)
-}
-
-// Locale represents an interface to translation
-type Locale interface {
-	Language() string
-	Tr(string, ...interface{}) string
-}
-
-// SendActivateAccountMail sends an activation mail to the user (new user registration)
-func SendActivateAccountMail(locale Locale, u *models.User) {
-	SendUserMail(locale.Language(), u, mailAuthActivate, u.GenerateActivateCode(), locale.Tr("mail.activate_account"), "activate account")
-}
-
-// SendResetPasswordMail sends a password reset mail to the user
-func SendResetPasswordMail(locale Locale, u *models.User) {
-	SendUserMail(locale.Language(), u, mailAuthResetPassword, u.GenerateActivateCode(), locale.Tr("mail.reset_password"), "recover account")
-}
-
-// SendActivateEmailMail sends confirmation email to confirm new email address
-func SendActivateEmailMail(locale Locale, u *models.User, email *models.EmailAddress) {
-	data := map[string]interface{}{
-		"DisplayName":     u.DisplayName(),
-		"ActiveCodeLives": timeutil.MinutesToFriendly(setting.Service.ActiveCodeLives, locale.Language()),
-		"Code":            u.GenerateEmailActivateCode(email.Email),
-		"Email":           email.Email,
-	}
-
-	var content bytes.Buffer
-
-	if err := bodyTemplates.ExecuteTemplate(&content, string(mailAuthActivateEmail), data); err != nil {
-		log.Error("Template: %v", err)
-		return
-	}
-
-	msg := NewMessage([]string{email.Email}, locale.Tr("mail.activate_email"), content.String())
-	msg.Info = fmt.Sprintf("UID: %d, activate email", u.ID)
-
-	SendAsync(msg)
-}
-
-// SendRegisterNotifyMail triggers a notify e-mail by admin created a account.
-func SendRegisterNotifyMail(locale Locale, u *models.User) {
 	if setting.MailService == nil {
-		log.Warn("SendRegisterNotifyMail is being invoked but mail service hasn't been initialized")
-		return
+		// No mail service configured
+		return nil
 	}
-
-	data := map[string]interface{}{
-		"DisplayName": u.DisplayName(),
-		"Username":    u.Name,
-	}
-
-	var content bytes.Buffer
-
-	if err := bodyTemplates.ExecuteTemplate(&content, string(mailAuthRegisterNotify), data); err != nil {
-		log.Error("Template: %v", err)
-		return
-	}
-
-	msg := NewMessage([]string{u.Email}, locale.Tr("mail.register_notify"), content.String())
-	msg.Info = fmt.Sprintf("UID: %d, registration notify", u.ID)
-
-	SendAsync(msg)
-}
-
-// SendCollaboratorMail sends mail notification to new collaborator.
-func SendCollaboratorMail(u, doer *models.User, repo *models.Repository) {
-	repoName := repo.FullName()
-	subject := fmt.Sprintf("%s added you to %s", doer.DisplayName(), repoName)
-
-	data := map[string]interface{}{
-		"Subject":  subject,
-		"RepoName": repoName,
-		"Link":     repo.HTMLURL(),
-	}
-
-	var content bytes.Buffer
-
-	if err := bodyTemplates.ExecuteTemplate(&content, string(mailNotifyCollaborator), data); err != nil {
-		log.Error("Template: %v", err)
-		return
-	}
-
-	msg := NewMessage([]string{u.Email}, subject, content.String())
-	msg.Info = fmt.Sprintf("UID: %d, add collaborator", u.ID)
-
-	SendAsync(msg)
-}
-
-func composeIssueCommentMessages(ctx *mailCommentContext, tos []string, fromMention bool, info string) []*Message {
-
-	var (
-		subject string
-		link    string
-		prefix  string
-		// Fall back subject for bad templates, make sure subject is never empty
-		fallback       string
-		reviewComments []*models.Comment
-	)
-
-	commentType := models.CommentTypeComment
-	if ctx.Comment != nil {
-		commentType = ctx.Comment.Type
-		link = ctx.Issue.HTMLURL() + "#" + ctx.Comment.HashTag()
-	} else {
-		link = ctx.Issue.HTMLURL()
-	}
-
-	reviewType := models.ReviewTypeComment
-	if ctx.Comment != nil && ctx.Comment.Review != nil {
-		reviewType = ctx.Comment.Review.Type
-	}
-
-	// This is the body of the new issue or comment, not the mail body
-	body := string(markup.RenderByType(markdown.MarkupName, []byte(ctx.Content), ctx.Issue.Repo.HTMLURL(), ctx.Issue.Repo.ComposeMetas()))
-
-	actType, actName, tplName := actionToTemplate(ctx.Issue, ctx.ActionType, commentType, reviewType)
-
-	if actName != "new" {
-		prefix = "Re: "
-	}
-	fallback = prefix + fallbackMailSubject(ctx.Issue)
-
-	if ctx.Comment != nil && ctx.Comment.Review != nil {
-		reviewComments = make([]*models.Comment, 0, 10)
-		for _, lines := range ctx.Comment.Review.CodeComments {
-			for _, comments := range lines {
-				reviewComments = append(reviewComments, comments...)
-			}
-		}
-	}
-
-	mailMeta := map[string]interface{}{
-		"FallbackSubject": fallback,
-		"Body":            body,
-		"Link":            link,
-		"Issue":           ctx.Issue,
-		"Comment":         ctx.Comment,
-		"IsPull":          ctx.Issue.IsPull,
-		"User":            ctx.Issue.Repo.MustOwner(),
-		"Repo":            ctx.Issue.Repo.FullName(),
-		"Doer":            ctx.Doer,
-		"IsMention":       fromMention,
-		"SubjectPrefix":   prefix,
-		"ActionType":      actType,
-		"ActionName":      actName,
-		"ReviewComments":  reviewComments,
-	}
-
-	var mailSubject bytes.Buffer
-	if err := subjectTemplates.ExecuteTemplate(&mailSubject, string(tplName), mailMeta); err == nil {
-		subject = sanitizeSubject(mailSubject.String())
-	} else {
-		log.Error("ExecuteTemplate [%s]: %v", string(tplName)+"/subject", err)
-	}
-
-	if subject == "" {
-		subject = fallback
-	}
-
-	subject = emoji.ReplaceAliases(subject)
-
-	mailMeta["Subject"] = subject
-
-	var mailBody bytes.Buffer
-
-	if err := bodyTemplates.ExecuteTemplate(&mailBody, string(tplName), mailMeta); err != nil {
-		log.Error("ExecuteTemplate [%s]: %v", string(tplName)+"/body", err)
-	}
-
-	// Make sure to compose independent messages to avoid leaking user emails
-	msgs := make([]*Message, 0, len(tos))
-	for _, to := range tos {
-		msg := NewMessageFrom([]string{to}, ctx.Doer.DisplayName(), setting.MailService.FromEmail, subject, mailBody.String())
-		msg.Info = fmt.Sprintf("Subject: %s, %s", subject, info)
-
-		// Set Message-ID on first message so replies know what to reference
-		if actName == "new" {
-			msg.SetHeader("Message-ID", "<"+ctx.Issue.ReplyReference()+">")
-		} else {
-			msg.SetHeader("In-Reply-To", "<"+ctx.Issue.ReplyReference()+">")
-			msg.SetHeader("References", "<"+ctx.Issue.ReplyReference()+">")
-		}
-		msgs = append(msgs, msg)
-	}
-
-	return msgs
+	return sender_service.Send(sender, sender_service.NewMessage(email, "Gitea Test Email!", "Gitea Test Email!"))
 }
 
 func sanitizeSubject(subject string) string {
-	runes := []rune(strings.TrimSpace(subjectRemoveSpaces.ReplaceAllLiteralString(subject, " ")))
+	runes := []rune(strings.TrimSpace(subjectRemoveSpaces().ReplaceAllLiteralString(subject, " ")))
 	if len(runes) > mailMaxSubjectRunes {
 		runes = runes[:mailMaxSubjectRunes]
 	}
@@ -273,71 +58,162 @@ func sanitizeSubject(subject string) string {
 	return mime.QEncoding.Encode("utf-8", string(runes))
 }
 
-// SendIssueAssignedMail composes and sends issue assigned email
-func SendIssueAssignedMail(issue *models.Issue, doer *models.User, content string, comment *models.Comment, tos []string) {
-	SendAsyncs(composeIssueCommentMessages(&mailCommentContext{
-		Issue:      issue,
-		Doer:       doer,
-		ActionType: models.ActionType(0),
-		Content:    content,
-		Comment:    comment,
-	}, tos, false, "issue assigned"))
+type mailAttachmentBase64Embedder struct {
+	doer         *user_model.User
+	repo         *repo_model.Repository
+	maxSize      int64
+	estimateSize int64
 }
 
-// actionToTemplate returns the type and name of the action facing the user
-// (slightly different from models.ActionType) and the name of the template to use (based on availability)
-func actionToTemplate(issue *models.Issue, actionType models.ActionType,
-	commentType models.CommentType, reviewType models.ReviewType) (typeName, name, template string) {
-	if issue.IsPull {
-		typeName = "pull"
-	} else {
-		typeName = "issue"
+func newMailAttachmentBase64Embedder(doer *user_model.User, repo *repo_model.Repository, maxSize int64) *mailAttachmentBase64Embedder {
+	return &mailAttachmentBase64Embedder{doer: doer, repo: repo, maxSize: maxSize}
+}
+
+func (b64embedder *mailAttachmentBase64Embedder) Base64InlineImages(ctx context.Context, body template.HTML) (template.HTML, error) {
+	doc, err := html.Parse(strings.NewReader(string(body)))
+	if err != nil {
+		return "", fmt.Errorf("html.Parse failed: %w", err)
 	}
-	switch actionType {
-	case models.ActionCreateIssue, models.ActionCreatePullRequest:
-		name = "new"
-	case models.ActionCommentIssue, models.ActionCommentPull:
-		name = "comment"
-	case models.ActionCloseIssue, models.ActionClosePullRequest:
-		name = "close"
-	case models.ActionReopenIssue, models.ActionReopenPullRequest:
-		name = "reopen"
-	case models.ActionMergePullRequest:
-		name = "merge"
-	default:
-		switch commentType {
-		case models.CommentTypeReview:
-			switch reviewType {
-			case models.ReviewTypeApprove:
-				name = "approve"
-			case models.ReviewTypeReject:
-				name = "reject"
-			default:
-				name = "review"
+
+	b64embedder.estimateSize = int64(len(string(body)))
+
+	var processNode func(*html.Node)
+	processNode = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			if n.Data == "img" {
+				for i, attr := range n.Attr {
+					if attr.Key == "src" {
+						attachmentSrc := attr.Val
+						dataURI, err := b64embedder.AttachmentSrcToBase64DataURI(ctx, attachmentSrc)
+						if err != nil {
+							// Not an error, just skip. This is probably an image from outside the gitea instance.
+							log.Trace("Unable to embed attachment %q to mail body: %v", attachmentSrc, err)
+						} else {
+							n.Attr[i].Val = dataURI
+						}
+						break
+					}
+				}
 			}
-		case models.CommentTypeCode:
-			name = "code"
-		case models.CommentTypeAssignees:
-			name = "assigned"
-		case models.CommentTypePullPush:
-			name = "push"
-		default:
-			name = "default"
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			processNode(c)
 		}
 	}
 
-	template = typeName + "/" + name
-	ok := bodyTemplates.Lookup(template) != nil
-	if !ok && typeName != "issue" {
-		template = "issue/" + name
-		ok = bodyTemplates.Lookup(template) != nil
+	processNode(doc)
+
+	var buf bytes.Buffer
+	err = html.Render(&buf, doc)
+	if err != nil {
+		return "", fmt.Errorf("html.Render failed: %w", err)
 	}
-	if !ok {
-		template = typeName + "/default"
-		ok = bodyTemplates.Lookup(template) != nil
+	return template.HTML(buf.String()), nil
+}
+
+func (b64embedder *mailAttachmentBase64Embedder) AttachmentSrcToBase64DataURI(ctx context.Context, attachmentSrc string) (string, error) {
+	parsedSrc := httplib.ParseGiteaSiteURL(ctx, attachmentSrc)
+	var attachmentUUID string
+	if parsedSrc != nil {
+		var ok bool
+		attachmentUUID, ok = strings.CutPrefix(parsedSrc.RoutePath, "/attachments/")
+		if !ok {
+			attachmentUUID, ok = strings.CutPrefix(parsedSrc.RepoSubPath, "/attachments/")
+		}
+		if !ok {
+			return "", errors.New("not an attachment")
+		}
 	}
-	if !ok {
-		template = "issue/default"
+	attachment, err := repo_model.GetAttachmentByUUID(ctx, attachmentUUID)
+	if err != nil {
+		return "", err
 	}
-	return
+
+	if attachment.RepoID != b64embedder.repo.ID {
+		return "", errors.New("attachment does not belong to the repository")
+	}
+	if attachment.Size+b64embedder.estimateSize > b64embedder.maxSize {
+		return "", errors.New("total embedded images exceed max limit")
+	}
+
+	fr, err := storage.Attachments.Open(attachment.RelativePath())
+	if err != nil {
+		return "", err
+	}
+	defer fr.Close()
+
+	lr := &io.LimitedReader{R: fr, N: b64embedder.maxSize + 1}
+	content, err := io.ReadAll(lr)
+	if err != nil {
+		return "", fmt.Errorf("LimitedReader ReadAll: %w", err)
+	}
+
+	mimeType := typesniffer.DetectContentType(content)
+	if !mimeType.IsImage() {
+		return "", errors.New("not an image")
+	}
+
+	encoded := base64.StdEncoding.EncodeToString(content)
+	dataURI := fmt.Sprintf("data:%s;base64,%s", mimeType.GetMimeType(), encoded)
+	b64embedder.estimateSize += int64(len(dataURI))
+	return dataURI, nil
+}
+
+func fromDisplayName(u *user_model.User) string {
+	if setting.MailService.FromDisplayNameFormatTemplate != nil {
+		var buf bytes.Buffer
+		err := setting.MailService.FromDisplayNameFormatTemplate.Execute(&buf, map[string]any{
+			"DisplayName": u.DisplayName(),
+			"AppName":     setting.AppName,
+			"Domain":      setting.AppDomain,
+		})
+		if err == nil {
+			return mime.QEncoding.Encode("utf-8", buf.String())
+		}
+		log.Error("fromDisplayName: %w", err)
+	}
+	def := u.Name
+	if fullName := strings.TrimSpace(u.FullName); fullName != "" {
+		// use "Full Name (username)" for email's sender name if Full Name is not empty
+		def = fullName + " (" + u.Name + ")"
+	}
+	return def
+}
+
+func generateMetadataHeaders(repo *repo_model.Repository) map[string]string {
+	return map[string]string{
+		// https://datatracker.ietf.org/doc/html/rfc2919
+		"List-ID": fmt.Sprintf("%s <%s.%s.%s>", repo.FullName(), repo.Name, repo.OwnerName, setting.AppDomain),
+
+		// https://datatracker.ietf.org/doc/html/rfc2369
+		"List-Archive": fmt.Sprintf("<%s>", repo.HTMLURL()),
+
+		"X-Mailer": "Gitea",
+
+		"X-Gitea-Repository":      repo.Name,
+		"X-Gitea-Repository-Path": repo.FullName(),
+		"X-Gitea-Repository-Link": repo.HTMLURL(),
+
+		"X-GitLab-Project":      repo.Name,
+		"X-GitLab-Project-Path": repo.FullName(),
+	}
+}
+
+func generateSenderRecipientHeaders(doer, recipient *user_model.User) map[string]string {
+	return map[string]string{
+		"X-Gitea-Sender":             doer.Name,
+		"X-Gitea-Recipient":          recipient.Name,
+		"X-Gitea-Recipient-Address":  recipient.Email,
+		"X-GitHub-Sender":            doer.Name,
+		"X-GitHub-Recipient":         recipient.Name,
+		"X-GitHub-Recipient-Address": recipient.Email,
+	}
+}
+
+func generateReasonHeaders(reason string) map[string]string {
+	return map[string]string{
+		"X-Gitea-Reason":              reason,
+		"X-GitHub-Reason":             reason,
+		"X-GitLab-NotificationReason": reason,
+	}
 }

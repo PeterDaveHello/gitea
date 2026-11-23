@@ -1,6 +1,5 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package setting
 
@@ -16,7 +15,6 @@ type indexerMatchList struct {
 }
 
 func Test_newIndexerGlobSettings(t *testing.T) {
-
 	checkGlobMatch(t, "", []indexerMatchList{})
 	checkGlobMatch(t, "     ", []indexerMatchList{})
 	checkGlobMatch(t, "data, */data, */data/*, **/data/*, **/data/**", []indexerMatchList{
@@ -67,7 +65,7 @@ func checkGlobMatch(t *testing.T, globstr string, list []indexerMatchList) {
 			}
 		}
 		if !found {
-			assert.Equal(t, m.position, -1, "Test string `%s` doesn't match `%s` anywhere; expected @%d", m.value, globstr, m.position)
+			assert.Equal(t, -1, m.position, "Test string `%s` doesn't match `%s` anywhere; expected @%d", m.value, globstr, m.position)
 		}
 	}
 }

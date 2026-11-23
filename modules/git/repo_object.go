@@ -1,15 +1,19 @@
 // Copyright 2014 The Gogs Authors. All rights reserved.
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package git
 
 import (
-	"bytes"
-	"io"
+	"context"
 	"strings"
+
+	"gitea.dev/modules/git/gitcmd"
 )
+
+// MaxGitObjectSize is used to avoid OOM when reading a large git object.
+// GitHub has a limit (100M) for pushing, but Gitea doesn't have such a limit yet.
+var MaxGitObjectSize int64 = 100 * 1024 * 1024
 
 // ObjectType git object type
 type ObjectType string
@@ -27,37 +31,52 @@ const (
 	ObjectBranch ObjectType = "branch"
 )
 
-// HashObject takes a reader and returns SHA1 hash for that reader
-func (repo *Repository) HashObject(reader io.Reader) (SHA1, error) {
-	idStr, err := repo.hashObject(reader)
+// Bytes returns the byte array for the Object Type
+func (o ObjectType) Bytes() []byte {
+	return []byte(o)
+}
+
+func (repo *Repository) GetObjectFormat(ctx context.Context) (ObjectFormat, error) {
+	if repo.objectFormatCache != nil {
+		return repo.objectFormatCache, nil
+	}
+
+	str, err := repo.hashObjectBytes(ctx, nil, false)
 	if err != nil {
-		return SHA1{}, err
+		return nil, err
+	}
+	hash, err := NewIDFromString(str)
+	if err != nil {
+		return nil, err
+	}
+
+	repo.objectFormatCache = hash.Type()
+
+	return repo.objectFormatCache, nil
+}
+
+// HashObjectBytes returns hash for the content
+func (repo *Repository) HashObjectBytes(ctx context.Context, buf []byte) (ObjectID, error) {
+	idStr, err := repo.hashObjectBytes(ctx, buf, true)
+	if err != nil {
+		return nil, err
 	}
 	return NewIDFromString(idStr)
 }
 
-func (repo *Repository) hashObject(reader io.Reader) (string, error) {
-	cmd := NewCommand("hash-object", "-w", "--stdin")
-	stdout := new(bytes.Buffer)
-	stderr := new(bytes.Buffer)
-	err := cmd.RunInDirFullPipeline(repo.Path, stdout, stderr, reader)
-
+func (repo *Repository) hashObjectBytes(ctx context.Context, buf []byte, save bool) (string, error) {
+	var cmd *gitcmd.Command
+	if save {
+		cmd = gitcmd.NewCommand("hash-object", "-w", "--stdin")
+	} else {
+		cmd = gitcmd.NewCommand("hash-object", "--stdin")
+	}
+	stdout, _, err := cmd.
+		WithRepo(repo).
+		WithStdinBytes(buf).
+		RunStdString(ctx)
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(stdout.String()), nil
-}
-
-// GetRefType gets the type of the ref based on the string
-func (repo *Repository) GetRefType(ref string) ObjectType {
-	if repo.IsTagExist(ref) {
-		return ObjectTag
-	} else if repo.IsBranchExist(ref) {
-		return ObjectBranch
-	} else if repo.IsCommitExist(ref) {
-		return ObjectCommit
-	} else if _, err := repo.GetBlob(ref); err == nil {
-		return ObjectBlob
-	}
-	return ObjectType("invalid")
+	return strings.TrimSpace(stdout), nil
 }

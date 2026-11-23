@@ -1,12 +1,11 @@
 // Copyright 2018 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package git
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"path/filepath"
 	"testing"
 
@@ -15,7 +14,7 @@ import (
 
 func TestRepository_GetBlob_Found(t *testing.T) {
 	repoPath := filepath.Join(testReposDir, "repo1_bare")
-	r, err := OpenRepository(repoPath)
+	r, err := OpenRepositoryLocal(t.Context(), repoPath)
 	assert.NoError(t, err)
 	defer r.Close()
 
@@ -31,40 +30,33 @@ func TestRepository_GetBlob_Found(t *testing.T) {
 		blob, err := r.GetBlob(testCase.OID)
 		assert.NoError(t, err)
 
-		dataReader, err := blob.DataAsync()
+		dataReader, err := blob.DataAsync(t.Context())
 		assert.NoError(t, err)
-		defer dataReader.Close()
 
-		data, err := ioutil.ReadAll(dataReader)
+		data, err := io.ReadAll(dataReader)
+		assert.NoError(t, dataReader.Close())
 		assert.NoError(t, err)
 		assert.Equal(t, testCase.Data, data)
 	}
 }
 
-func TestRepository_GetBlob_NotExist(t *testing.T) {
-	repoPath := filepath.Join(testReposDir, "repo1_bare")
-	r, err := OpenRepository(repoPath)
-	assert.NoError(t, err)
-	defer r.Close()
+func TestRepository_GetBlob_Errors(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		id   string
+		err  error
+	}{
+		{"NotExist", "0000000000000000000000000000000000000000", ErrNotExist{"0000000000000000000000000000000000000000", ""}},
+		{"NoId", "", fmt.Errorf("length %d has no matched object format: %s", len(""), "")},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			r, err := OpenRepositoryLocal(t.Context(), filepath.Join(testReposDir, "repo1_bare"))
+			assert.NoError(t, err)
+			defer r.Close()
 
-	testCase := "0000000000000000000000000000000000000000"
-	testError := ErrNotExist{testCase, ""}
-
-	blob, err := r.GetBlob(testCase)
-	assert.Nil(t, blob)
-	assert.EqualError(t, err, testError.Error())
-}
-
-func TestRepository_GetBlob_NoId(t *testing.T) {
-	repoPath := filepath.Join(testReposDir, "repo1_bare")
-	r, err := OpenRepository(repoPath)
-	assert.NoError(t, err)
-	defer r.Close()
-
-	testCase := ""
-	testError := fmt.Errorf("Length must be 40: %s", testCase)
-
-	blob, err := r.GetBlob(testCase)
-	assert.Nil(t, blob)
-	assert.EqualError(t, err, testError.Error())
+			blob, err := r.GetBlob(testCase.id)
+			assert.Nil(t, blob)
+			assert.EqualError(t, err, testCase.err.Error())
+		})
+	}
 }

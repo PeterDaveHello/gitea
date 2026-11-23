@@ -1,81 +1,100 @@
 {{template "base/head" .}}
-<div class="organization profile">
-	{{/* overflow: auto is the clearfix - this avoids the image going beyond
-	the container where it is supposed to stay inside. */}}
-	<div class="ui container" style="overflow: auto">
-		<img class="ui left" id="org-avatar" src="{{.Org.SizedRelAvatarLink 140}}"/>
-		<div id="org-info">
-			<div class="ui header">
-				{{.Org.DisplayName}}
-				{{if .IsOrganizationOwner}}<a class="middle text grey" href="{{.OrgLink}}/settings">{{svg "octicon-gear" 16}}</a>{{end}}
-			</div>
-			{{if .Org.Description}}<p class="desc">{{.Org.Description}}</p>{{end}}
-			<div class="text grey meta">
-				{{if .Org.Location}}<div class="item">{{svg "octicon-location" 16}} <span>{{.Org.Location}}</span></div>{{end}}
-				{{if .Org.Website}}<div class="item">{{svg "octicon-link" 16}} <a target="_blank" rel="noopener noreferrer" href="{{.Org.Website}}">{{.Org.Website}}</a></div>{{end}}
-			</div>
-		</div>
-	</div>
-
-	<div class="ui divider"></div>
+<div role="main" aria-label="{{.Title}}" class="page-content organization profile">
+	{{template "org/header" .}}
 
 	<div class="ui container">
 		<div class="ui mobile reversed stackable grid">
-			<div class="ui eleven wide column">
-				{{if .CanCreateOrgRepo}}
-					<div class="text right">
-						<a class="ui green button" href="{{AppSubUrl}}/repo/create?org={{.Org.ID}}">{{.i18n.Tr "new_repo"}}</a>
-					</div>
-					<div class="ui divider"></div>
+			<div class="ui {{if .ShowMemberAndTeamTab}}eleven wide{{end}} column">
+				{{if .ProfileReadmeContent}}
+					<div id="readme_profile" class="render-content markup" data-profile-view-as-member="{{.IsViewingOrgAsMember}}">{{.ProfileReadmeContent}}</div>
 				{{end}}
-				{{template "explore/repo_search" .}}
-				{{template "explore/repo_list" .}}
-				{{template "base/paginate" .}}
+				{{template "shared/repo/search" .}}
+				<div class="divider"></div>
+				{{if not .Repos}}
+					<div class="empty-placeholder">
+						{{svg "octicon-repo" 48}}
+						<h2>{{ctx.Locale.Tr "org.repos.empty"}}</h2>
+						<p>{{ctx.Locale.Tr "org.repos.empty_description"}}</p>
+					</div>
+				{{else}}
+					{{template "shared/repo/list" .}}
+					{{template "base/paginate" .}}
+				{{end}}
 			</div>
 
+			{{if .ShowMemberAndTeamTab}}
 			<div class="ui five wide column">
-				<h4 class="ui top attached header">
-					<strong>{{.i18n.Tr "org.people"}}</strong>
-					{{if .IsOrganizationMember}}
-						<div class="ui right">
-							<a class="text grey" href="{{.OrgLink}}/members">{{.Org.NumMembers}} {{svg "octicon-chevron-right" 16}}</a>
-						</div>
-					{{end}}
-				</h4>
-				<div class="ui attached segment members">
-					{{$isMember := .IsOrganizationMember}}
-					{{range .Members}}
-						{{if or $isMember (.IsPublicMember $.Org.ID)}}
-							<a href="{{.HomeLink}}" title="{{.Name}}{{if .FullName}} ({{.FullName}}){{end}}"><img class="ui avatar" src="{{.RelAvatarLink}}"></a>
+				{{if .CanCreateOrgRepo}}
+					<div class="tw-flex tw-flex-wrap tw-justify-center tw-gap-x-1 tw-gap-y-2 tw-mb-4">
+						<a class="ui primary button tw-grow" href="{{AppSubUrl}}/repo/create?org={{.Org.ID}}">{{ctx.Locale.Tr "new_repo"}}</a>
+						{{if not .DisableNewPullMirrors}}
+							<a class="ui primary button tw-grow" href="{{AppSubUrl}}/repo/migrate?org={{.Org.ID}}&mirror=1">{{ctx.Locale.Tr "new_migrate"}}</a>
 						{{end}}
-					{{end}}
-				</div>
+					</div>
+					<div class="divider"></div>
+				{{end}}
 
-				{{if .IsOrganizationMember}}
-					<div class="ui top attached header">
-						<strong>{{.i18n.Tr "org.teams"}}</strong>
-						<div class="ui right">
-							<a class="text grey" href="{{.OrgLink}}/teams"><span>{{.Org.NumTeams}}</span> {{svg "octicon-chevron-right" 16}}</a>
+				{{if and .ShowMemberAndTeamTab .ShowOrgProfileReadmeSelector}}
+				<div class="tw-my-4">
+					<div id="org-home-view-as-dropdown" class="ui dropdown jump">
+						{{- $viewAsRole := Iif (.IsViewingOrgAsMember) (ctx.Locale.Tr "org.members.member") (ctx.Locale.Tr "settings.visibility.public") -}}
+						<span class="text">{{svg "octicon-eye"}} {{ctx.Locale.Tr "org.view_as_role" $viewAsRole}}</span>
+						{{svg "octicon-triangle-down" 14 "dropdown icon"}}
+						<div class="menu">
+							<a href="?view_as=public" class="item {{if not .IsViewingOrgAsMember}}selected{{end}}">
+								{{svg "octicon-check" 14 (Iif (not .IsViewingOrgAsMember) "" "tw-invisible")}} {{ctx.Locale.Tr "settings.visibility.public"}}
+							</a>
+							<a href="?view_as=member" class="item {{if .IsViewingOrgAsMember}}selected{{end}}">
+								{{svg "octicon-check" 14 (Iif .IsViewingOrgAsMember "" "tw-invisible")}}  {{ctx.Locale.Tr "org.members.member"}}
+							</a>
 						</div>
 					</div>
-					<div class="ui attached table segment teams">
-						{{range .Teams}}
-							<div class="item">
-								<a href="{{$.OrgLink}}/teams/{{.LowerName}}"><strong class="team-name">{{.Name}}</strong></a>
-								<p class="text grey">
-									<a href="{{$.OrgLink}}/teams/{{.LowerName}}"><strong>{{.NumMembers}}</strong> {{$.i18n.Tr "org.lower_members"}}</a> ·
-									<a href="{{$.OrgLink}}/teams/{{.LowerName}}/repositories"><strong>{{.NumRepos}}</strong> {{$.i18n.Tr "org.lower_repositories"}}</a>
+					<div class="tw-my-2">
+						{{if .IsViewingOrgAsMember}}{{ctx.Locale.Tr "org.view_as_member_hint"}}{{else}}{{ctx.Locale.Tr "org.view_as_public_hint"}}{{end}}
+					</div>
+				</div>
+				{{end}}
+
+				{{if .NumMembers}}
+					<h4 class="ui top attached header flex-left-right">
+						<strong>{{ctx.Locale.Tr "org.members"}}</strong>
+						<a class="tw-text-text-light flex-text-inline" href="{{.OrgLink}}/members"><span>{{.NumMembers}}</span> {{svg "octicon-chevron-right"}}</a>
+					</h4>
+					{{/* gap 8px below is specifically chosen to make sure a full line of avatars can exactly fit the segment width */}}
+					<div class="ui attached segment flex-text-block tw-flex-wrap tw-gap-[8px]">
+						{{range $memberUser := .OrgOverviewMembers}}
+							{{if or $.IsOrganizationMember (call $.IsPublicMember $memberUser.ID)}}
+								{{template "shared/user/avatarlink" dict "user" $memberUser "size" 32 "tooltip" true}}
+							{{end}}
+						{{end}}
+					</div>
+				{{end}}
+				{{if .IsOrganizationMember}}
+					<div class="ui top attached header flex-left-right">
+						<strong>{{ctx.Locale.Tr "org.teams"}}</strong>
+						<a class="tw-text-text-light flex-text-inline" href="{{.OrgLink}}/teams"><span>{{.Org.NumTeams}}</span> {{svg "octicon-chevron-right"}}</a>
+					</div>
+					<div class="ui attached segment">
+						<div class="flex-relaxed-list">
+						{{range .OrgOverviewTeams}}
+							<div>
+								<a href="{{$.OrgLink}}/teams/{{.LowerName | PathEscape}}"><strong>{{.Name}}</strong></a>
+								<p class="tw-text-text-light">
+									<a class="muted" href="{{$.OrgLink}}/teams/{{.LowerName | PathEscape}}"><strong>{{.NumMembers}}</strong> {{ctx.Locale.Tr "org.lower_members"}}</a> ·
+									<a class="muted" href="{{$.OrgLink}}/teams/{{.LowerName | PathEscape}}/repositories"><strong>{{.NumRepos}}</strong> {{ctx.Locale.Tr "org.lower_repositories"}}</a>
 								</p>
 							</div>
 						{{end}}
+						</div>
 					</div>
 					{{if .IsOrganizationOwner}}
 						<div class="ui bottom attached segment">
-							<a class="ui blue small button" href="{{.OrgLink}}/teams/new">{{.i18n.Tr "org.create_new_team"}}</a>
+							<a class="ui primary small button" href="{{.OrgLink}}/teams/new">{{ctx.Locale.Tr "org.create_new_team"}}</a>
 						</div>
 					{{end}}
 				{{end}}
 			</div>
+			{{end}}
 		</div>
 	</div>
 </div>

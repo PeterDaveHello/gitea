@@ -1,13 +1,13 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package log
 
 import (
-	"encoding/json"
 	"fmt"
 	"testing"
+
+	"gitea.dev/modules/json"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -24,25 +24,17 @@ func TestLevelMarshalUnmarshalJSON(t *testing.T) {
 	assert.Equal(t, string(makeTestLevelBytes(INFO.String())), string(levelBytes))
 
 	var testLevel testLevel
-	err = json.Unmarshal(levelBytes, &testLevel)
-	assert.NoError(t, err)
-	assert.Equal(t, INFO, testLevel.Level)
-
-	err = json.Unmarshal(makeTestLevelBytes(`FOFOO`), &testLevel)
-	assert.NoError(t, err)
-	assert.Equal(t, INFO, testLevel.Level)
-
-	err = json.Unmarshal([]byte(fmt.Sprintf(`{"level":%d}`, 2)), &testLevel)
-	assert.NoError(t, err)
-	assert.Equal(t, INFO, testLevel.Level)
-
-	err = json.Unmarshal([]byte(fmt.Sprintf(`{"level":%d}`, 10012)), &testLevel)
-	assert.NoError(t, err)
-	assert.Equal(t, INFO, testLevel.Level)
-
-	err = json.Unmarshal([]byte(`{"level":{}}`), &testLevel)
-	assert.NoError(t, err)
-	assert.Equal(t, INFO, testLevel.Level)
+	for _, levelJSON := range [][]byte{
+		levelBytes,
+		makeTestLevelBytes(`FOFOO`),
+		fmt.Appendf(nil, `{"level":%d}`, 2),
+		fmt.Appendf(nil, `{"level":%d}`, 10012),
+		[]byte(`{"level":{}}`),
+	} {
+		err = json.Unmarshal(levelJSON, &testLevel)
+		assert.NoError(t, err)
+		assert.Equal(t, INFO, testLevel.Level)
+	}
 
 	assert.Equal(t, INFO.String(), Level(1001).String())
 
@@ -51,5 +43,5 @@ func TestLevelMarshalUnmarshalJSON(t *testing.T) {
 }
 
 func makeTestLevelBytes(level string) []byte {
-	return []byte(fmt.Sprintf(`{"level":"%s"}`, level))
+	return fmt.Appendf(nil, `{"level":"%s"}`, level)
 }

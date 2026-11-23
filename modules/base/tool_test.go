@@ -1,31 +1,19 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package base
 
 import (
-	"net/url"
+	"crypto/sha1"
+	"fmt"
 	"testing"
+	"time"
 
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/test"
 
 	"github.com/stretchr/testify/assert"
 )
-
-func TestEncodeMD5(t *testing.T) {
-	assert.Equal(t,
-		"3858f62230ac3c915f300c664312c63f",
-		EncodeMD5("foobar"),
-	)
-}
-
-func TestEncodeSha1(t *testing.T) {
-	assert.Equal(t,
-		"8843d7f92416211de9ebb963ff4ce28125932878",
-		EncodeSha1("foobar"),
-	)
-}
 
 func TestEncodeSha256(t *testing.T) {
 	assert.Equal(t,
@@ -38,138 +26,54 @@ func TestShortSha(t *testing.T) {
 	assert.Equal(t, "veryverylo", ShortSha("veryverylong"))
 }
 
-func TestBasicAuthDecode(t *testing.T) {
-	_, _, err := BasicAuthDecode("?")
-	assert.Equal(t, "illegal base64 data at input byte 0", err.Error())
+func TestVerifyTimeLimitCode(t *testing.T) {
+	defer test.MockVariableValue(&setting.InstallLock, true)()
+	initGeneralSecret := func(secret string) {
+		setting.CfgProvider, _ = setting.NewConfigProviderFromData(fmt.Sprintf(`
+[security]
+INTERNAL_TOKEN = dummy
+INSTALL_LOCK = true
+[oauth2]
+JWT_SECRET = %s
+`, secret))
+		setting.LoadCommonSettings()
+	}
 
-	user, pass, err := BasicAuthDecode("Zm9vOmJhcg==")
-	assert.NoError(t, err)
-	assert.Equal(t, "foo", user)
-	assert.Equal(t, "bar", pass)
-}
+	initGeneralSecret("KZb_QLUd4fYVyxetjxC4eZkrBgWM2SndOOWDNtgUUko")
+	now := time.Now()
 
-func TestBasicAuthEncode(t *testing.T) {
-	assert.Equal(t, "Zm9vOmJhcg==", BasicAuthEncode("foo", "bar"))
-}
+	t.Run("TestGenericParameter", func(t *testing.T) {
+		time2000 := time.Date(2000, 1, 2, 3, 4, 5, 0, time.Local)
+		assert.Equal(t, "2000010203040000026fa5221b2731b7cf80b1b506f5e39e38c115fee5", CreateTimeLimitCode("test-sha1", 2, time2000, sha1.New()))
+		assert.Equal(t, "2000010203040000026fa5221b2731b7cf80b1b506f5e39e38c115fee5", CreateTimeLimitCode("test-sha1", 2, "200001020304", sha1.New()))
+		assert.Equal(t, "2000010203040000024842227a2f87041ff82025199c0187410a9297bf", CreateTimeLimitCode("test-hmac", 2, time2000, nil))
+		assert.Equal(t, "2000010203040000024842227a2f87041ff82025199c0187410a9297bf", CreateTimeLimitCode("test-hmac", 2, "200001020304", nil))
+	})
 
-// TODO: Test PBKDF2()
-// TODO: Test VerifyTimeLimitCode()
-// TODO: Test CreateTimeLimitCode()
+	t.Run("TestInvalidCode", func(t *testing.T) {
+		assert.False(t, VerifyTimeLimitCode(now, "data", 2, ""))
+		assert.False(t, VerifyTimeLimitCode(now, "data", 2, "invalid code"))
+	})
 
-func TestHashEmail(t *testing.T) {
-	assert.Equal(t,
-		"d41d8cd98f00b204e9800998ecf8427e",
-		HashEmail(""),
-	)
-	assert.Equal(t,
-		"353cbad9b58e69c96154ad99f92bedc7",
-		HashEmail("gitea@example.com"),
-	)
-}
+	t.Run("TestCreateAndVerify", func(t *testing.T) {
+		code := CreateTimeLimitCode("data", 2, now, nil)
+		assert.False(t, VerifyTimeLimitCode(now.Add(-time.Minute), "data", 2, code)) // not started yet
+		assert.True(t, VerifyTimeLimitCode(now, "data", 2, code))
+		assert.True(t, VerifyTimeLimitCode(now.Add(time.Minute), "data", 2, code))
+		assert.False(t, VerifyTimeLimitCode(now.Add(time.Minute), "DATA", 2, code))   // invalid data
+		assert.False(t, VerifyTimeLimitCode(now.Add(2*time.Minute), "data", 2, code)) // expired
+	})
 
-const gravatarSource = "https://secure.gravatar.com/avatar/"
-
-func disableGravatar() {
-	setting.EnableFederatedAvatar = false
-	setting.LibravatarService = nil
-	setting.DisableGravatar = true
-}
-
-func enableGravatar(t *testing.T) {
-	setting.DisableGravatar = false
-	var err error
-	setting.GravatarSourceURL, err = url.Parse(gravatarSource)
-	assert.NoError(t, err)
-}
-
-func TestSizedAvatarLink(t *testing.T) {
-	disableGravatar()
-	assert.Equal(t, "/img/avatar_default.png",
-		SizedAvatarLink("gitea@example.com", 100))
-
-	enableGravatar(t)
-	assert.Equal(t,
-		"https://secure.gravatar.com/avatar/353cbad9b58e69c96154ad99f92bedc7?d=identicon&s=100",
-		SizedAvatarLink("gitea@example.com", 100),
-	)
-}
-
-func TestFileSize(t *testing.T) {
-	var size int64 = 512
-	assert.Equal(t, "512 B", FileSize(size))
-	size *= 1024
-	assert.Equal(t, "512 KiB", FileSize(size))
-	size *= 1024
-	assert.Equal(t, "512 MiB", FileSize(size))
-	size *= 1024
-	assert.Equal(t, "512 GiB", FileSize(size))
-	size *= 1024
-	assert.Equal(t, "512 TiB", FileSize(size))
-	size *= 1024
-	assert.Equal(t, "512 PiB", FileSize(size))
-	size *= 4
-	assert.Equal(t, "2.0 EiB", FileSize(size))
-}
-
-func TestSubtract(t *testing.T) {
-	toFloat64 := func(n interface{}) float64 {
-		switch v := n.(type) {
-		case int:
-			return float64(v)
-		case int8:
-			return float64(v)
-		case int16:
-			return float64(v)
-		case int32:
-			return float64(v)
-		case int64:
-			return float64(v)
-		case float32:
-			return float64(v)
-		case float64:
-			return v
-		default:
-			return 0.0
+	t.Run("TestDifferentSecret", func(t *testing.T) {
+		// use another secret to ensure the code is invalid for different secret
+		verifyDataCode := func(c string) bool {
+			return VerifyTimeLimitCode(now, "data", 2, c)
 		}
-	}
-	values := []interface{}{
-		int(-3),
-		int8(14),
-		int16(81),
-		int32(-156),
-		int64(1528),
-		float32(3.5),
-		float64(-15.348),
-	}
-	for _, left := range values {
-		for _, right := range values {
-			expected := toFloat64(left) - toFloat64(right)
-			sub := Subtract(left, right)
-			assert.InDelta(t, expected, sub, 1e-3)
-		}
-	}
-}
-
-func TestEllipsisString(t *testing.T) {
-	assert.Equal(t, "...", EllipsisString("foobar", 0))
-	assert.Equal(t, "...", EllipsisString("foobar", 1))
-	assert.Equal(t, "...", EllipsisString("foobar", 2))
-	assert.Equal(t, "...", EllipsisString("foobar", 3))
-	assert.Equal(t, "f...", EllipsisString("foobar", 4))
-	assert.Equal(t, "fo...", EllipsisString("foobar", 5))
-	assert.Equal(t, "foobar", EllipsisString("foobar", 6))
-	assert.Equal(t, "foobar", EllipsisString("foobar", 10))
-}
-
-func TestTruncateString(t *testing.T) {
-	assert.Equal(t, "", TruncateString("foobar", 0))
-	assert.Equal(t, "f", TruncateString("foobar", 1))
-	assert.Equal(t, "fo", TruncateString("foobar", 2))
-	assert.Equal(t, "foo", TruncateString("foobar", 3))
-	assert.Equal(t, "foob", TruncateString("foobar", 4))
-	assert.Equal(t, "fooba", TruncateString("foobar", 5))
-	assert.Equal(t, "foobar", TruncateString("foobar", 6))
-	assert.Equal(t, "foobar", TruncateString("foobar", 7))
+		code := CreateTimeLimitCode("data", 2, now, nil)
+		assert.True(t, verifyDataCode(code))
+		initGeneralSecret("000_QLUd4fYVyxetjxC4eZkrBgWM2SndOOWDNtgUUko")
+		assert.False(t, verifyDataCode(code))
+	})
 }
 
 func TestStringsToInt64s(t *testing.T) {
@@ -178,12 +82,14 @@ func TestStringsToInt64s(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, expected, result)
 	}
+	testSuccess(nil, nil)
 	testSuccess([]string{}, []int64{})
+	testSuccess([]string{""}, []int64{})
 	testSuccess([]string{"-1234"}, []int64{-1234})
-	testSuccess([]string{"1", "4", "16", "64", "256"},
-		[]int64{1, 4, 16, 64, 256})
+	testSuccess([]string{"1", "4", "16", "64", "256"}, []int64{1, 4, 16, 64, 256})
 
-	_, err := StringsToInt64s([]string{"-1", "a", "$"})
+	ints, err := StringsToInt64s([]string{"-1", "a"})
+	assert.Empty(t, ints)
 	assert.Error(t, err)
 }
 
@@ -194,34 +100,3 @@ func TestInt64sToStrings(t *testing.T) {
 		Int64sToStrings([]int64{1, 4, 16, 64, 256}),
 	)
 }
-
-func TestInt64sToMap(t *testing.T) {
-	assert.Equal(t, map[int64]bool{}, Int64sToMap([]int64{}))
-	assert.Equal(t,
-		map[int64]bool{1: true, 4: true, 16: true},
-		Int64sToMap([]int64{1, 4, 16}),
-	)
-}
-
-func TestIsLetter(t *testing.T) {
-	assert.True(t, IsLetter('a'))
-	assert.True(t, IsLetter('e'))
-	assert.True(t, IsLetter('q'))
-	assert.True(t, IsLetter('z'))
-	assert.True(t, IsLetter('A'))
-	assert.True(t, IsLetter('E'))
-	assert.True(t, IsLetter('Q'))
-	assert.True(t, IsLetter('Z'))
-	assert.True(t, IsLetter('_'))
-	assert.False(t, IsLetter('-'))
-	assert.False(t, IsLetter('1'))
-	assert.False(t, IsLetter('$'))
-}
-
-func TestIsTextFile(t *testing.T) {
-	assert.True(t, IsTextFile([]byte{}))
-	assert.True(t, IsTextFile([]byte("lorem ipsum")))
-}
-
-// TODO: IsImageFile(), currently no idea how to test
-// TODO: IsPDFFile(), currently no idea how to test

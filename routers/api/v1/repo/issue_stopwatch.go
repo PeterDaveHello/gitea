@@ -1,16 +1,16 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package repo
 
 import (
-	"errors"
 	"net/http"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/context"
-	"code.gitea.io/gitea/routers/api/v1/utils"
+	issues_model "gitea.dev/models/issues"
+	"gitea.dev/routers/api/v1/utils"
+	"gitea.dev/services/context"
+	"gitea.dev/services/convert"
+	notify_service "gitea.dev/services/notify"
 )
 
 // StartIssueStopwatch creates a stopwatch for the given issue.
@@ -42,22 +42,22 @@ func StartIssueStopwatch(ctx *context.APIContext) {
 	// responses:
 	//   "201":
 	//     "$ref": "#/responses/empty"
-	//   "403":
-	//     description: Not repo writer, user does not have rights to toggle stopwatch
-	//   "404":
-	//     "$ref": "#/responses/notFound"
-	//   "409":
-	//     description: Cannot start a stopwatch again if it already exists
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	issue, err := prepareIssueStopwatch(ctx, false)
-	if err != nil {
+	issue := prepareIssueForStopwatch(ctx)
+	if ctx.Written() {
 		return
 	}
 
-	if err := models.CreateOrStopIssueStopwatch(ctx.User, issue); err != nil {
-		ctx.Error(http.StatusInternalServerError, "CreateOrStopIssueStopwatch", err)
+	if ok, err := issues_model.CreateIssueStopwatch(ctx, ctx.Doer, issue); err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	} else if !ok {
+		ctx.APIError(http.StatusConflict, "cannot start a stopwatch again if it already exists")
 		return
 	}
+	notify_service.StopwatchChanged(ctx, ctx.Doer)
 
 	ctx.Status(http.StatusCreated)
 }
@@ -91,23 +91,22 @@ func StopIssueStopwatch(ctx *context.APIContext) {
 	// responses:
 	//   "201":
 	//     "$ref": "#/responses/empty"
-	//   "403":
-	//     description: Not repo writer, user does not have rights to toggle stopwatch
-	//   "404":
-	//     "$ref": "#/responses/notFound"
-	//   "409":
-	//     description:  Cannot stop a non existent stopwatch
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	issue, err := prepareIssueStopwatch(ctx, true)
-	if err != nil {
+	issue := prepareIssueForStopwatch(ctx)
+	if ctx.Written() {
 		return
 	}
 
-	if err := models.CreateOrStopIssueStopwatch(ctx.User, issue); err != nil {
-		ctx.Error(http.StatusInternalServerError, "CreateOrStopIssueStopwatch", err)
+	if ok, err := issues_model.FinishIssueStopwatch(ctx, ctx.Doer, issue); err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	} else if !ok {
+		ctx.APIError(http.StatusConflict, "cannot stop a non-existent stopwatch")
 		return
 	}
-
+	notify_service.StopwatchChanged(ctx, ctx.Doer)
 	ctx.Status(http.StatusCreated)
 }
 
@@ -140,60 +139,42 @@ func DeleteIssueStopwatch(ctx *context.APIContext) {
 	// responses:
 	//   "204":
 	//     "$ref": "#/responses/empty"
-	//   "403":
-	//     description: Not repo writer, user does not have rights to toggle stopwatch
-	//   "404":
-	//     "$ref": "#/responses/notFound"
-	//   "409":
-	//     description:  Cannot cancel a non existent stopwatch
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	issue, err := prepareIssueStopwatch(ctx, true)
-	if err != nil {
+	issue := prepareIssueForStopwatch(ctx)
+	if ctx.Written() {
 		return
 	}
 
-	if err := models.CancelStopwatch(ctx.User, issue); err != nil {
-		ctx.Error(http.StatusInternalServerError, "CancelStopwatch", err)
+	if ok, err := issues_model.CancelStopwatch(ctx, ctx.Doer, issue); err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	} else if !ok {
+		ctx.APIError(http.StatusConflict, "cannot cancel a non-existent stopwatch")
 		return
 	}
+	notify_service.StopwatchChanged(ctx, ctx.Doer)
 
 	ctx.Status(http.StatusNoContent)
 }
 
-func prepareIssueStopwatch(ctx *context.APIContext, shouldExist bool) (*models.Issue, error) {
-	issue, err := models.GetIssueByIndex(ctx.Repo.Repository.ID, ctx.ParamsInt64(":index"))
-	if err != nil {
-		if models.IsErrIssueNotExist(err) {
-			ctx.NotFound()
-		} else {
-			ctx.Error(http.StatusInternalServerError, "GetIssueByIndex", err)
-		}
-
-		return nil, err
+func prepareIssueForStopwatch(ctx *context.APIContext) *issues_model.Issue {
+	issue := getRepoIssueByIndexForDoer(ctx, ctx.PathParamInt64("index"))
+	if issue == nil {
+		return nil
 	}
 
-	if !ctx.Repo.CanWriteIssuesOrPulls(issue.IsPull) {
+	if !ctx.Repo.Permission.CanWriteIssuesOrPulls(issue.IsPull) {
 		ctx.Status(http.StatusForbidden)
-		return nil, errors.New("Unable to write to PRs")
+		return nil
 	}
 
-	if !ctx.Repo.CanUseTimetracker(issue, ctx.User) {
+	if !ctx.Repo.CanUseTimetracker(ctx, issue, ctx.Doer) {
 		ctx.Status(http.StatusForbidden)
-		return nil, errors.New("Cannot use time tracker")
+		return nil
 	}
-
-	if models.StopwatchExists(ctx.User.ID, issue.ID) != shouldExist {
-		if shouldExist {
-			ctx.Error(http.StatusConflict, "StopwatchExists", "cannot stop/cancel a non existent stopwatch")
-			err = errors.New("cannot stop/cancel a non existent stopwatch")
-		} else {
-			ctx.Error(http.StatusConflict, "StopwatchExists", "cannot start a stopwatch again if it already exists")
-			err = errors.New("cannot start a stopwatch again if it already exists")
-		}
-		return nil, err
-	}
-
-	return issue, nil
+	return issue
 }
 
 // GetStopwatches get all stopwatches
@@ -218,17 +199,24 @@ func GetStopwatches(ctx *context.APIContext) {
 	//   "200":
 	//     "$ref": "#/responses/StopWatchList"
 
-	sws, err := models.GetUserStopwatches(ctx.User.ID, utils.GetListOptions(ctx))
+	sws, err := issues_model.GetUserStopwatches(ctx, ctx.Doer.ID, utils.GetListOptions(ctx))
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetUserStopwatches", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
-	apiSWs, err := sws.APIFormat()
+	count, err := issues_model.CountUserStopwatches(ctx, ctx.Doer.ID)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "APIFormat", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
+	apiSWs, err := convert.ToStopWatches(ctx, ctx.Doer, sws)
+	if err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+
+	ctx.SetTotalCountHeader(count)
 	ctx.JSON(http.StatusOK, apiSWs)
 }

@@ -1,6 +1,5 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package secret
 
@@ -10,13 +9,23 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestNew(t *testing.T) {
-	result, err := New()
+func TestEncryptDecrypt(t *testing.T) {
+	hex, err := EncryptSecret("foo", "baz")
 	assert.NoError(t, err)
-	assert.True(t, len(result) > 32)
+	str, _ := DecryptSecret("foo", hex)
+	assert.Equal(t, "baz", str)
 
-	result2, err := New()
+	hex, err = EncryptSecret("bar", "baz")
 	assert.NoError(t, err)
-	// check if secrets
-	assert.NotEqual(t, result, result2)
+	str, _ = DecryptSecret("foo", hex)
+	assert.NotEqual(t, "baz", str)
+
+	_, err = DecryptSecret("a", "b")
+	assert.ErrorContains(t, err, "invalid hex string")
+
+	_, err = DecryptSecret("a", "bb")
+	assert.ErrorContains(t, err, "the key (maybe SECRET_KEY?) might be incorrect: AesDecrypt ciphertext too short")
+
+	_, err = DecryptSecret("a", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	assert.ErrorContains(t, err, "the key (maybe SECRET_KEY?) might be incorrect: AesDecrypt invalid decrypted base64 string")
 }

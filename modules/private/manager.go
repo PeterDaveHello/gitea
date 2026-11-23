@@ -1,191 +1,93 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package private
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/modules/setting"
 )
 
 // Shutdown calls the internal shutdown function
-func Shutdown() (int, string) {
+func Shutdown(ctx context.Context) ResponseExtra {
 	reqURL := setting.LocalURL + "api/internal/manager/shutdown"
-
-	req := newInternalRequest(reqURL, "POST")
-	resp, err := req.Response()
-	if err != nil {
-		return http.StatusInternalServerError, fmt.Sprintf("Unable to contact gitea: %v", err.Error())
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return resp.StatusCode, decodeJSONError(resp).Err
-	}
-
-	return http.StatusOK, "Shutting down"
+	req := newInternalRequestAPI(ctx, reqURL, "POST")
+	return requestJSONClientMsg(req, "Shutting down")
 }
 
 // Restart calls the internal restart function
-func Restart() (int, string) {
+func Restart(ctx context.Context) ResponseExtra {
 	reqURL := setting.LocalURL + "api/internal/manager/restart"
+	req := newInternalRequestAPI(ctx, reqURL, "POST")
+	return requestJSONClientMsg(req, "Restarting")
+}
 
-	req := newInternalRequest(reqURL, "POST")
-	resp, err := req.Response()
-	if err != nil {
-		return http.StatusInternalServerError, fmt.Sprintf("Unable to contact gitea: %v", err.Error())
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return resp.StatusCode, decodeJSONError(resp).Err
-	}
-
-	return http.StatusOK, "Restarting"
+// ReloadTemplates calls the internal reload-templates function
+func ReloadTemplates(ctx context.Context) ResponseExtra {
+	reqURL := setting.LocalURL + "api/internal/manager/reload-templates"
+	req := newInternalRequestAPI(ctx, reqURL, "POST")
+	return requestJSONClientMsg(req, "Reloaded")
 }
 
 // FlushOptions represents the options for the flush call
 type FlushOptions struct {
-	Timeout     time.Duration
+	Timeout     int64
 	NonBlocking bool
 }
 
 // FlushQueues calls the internal flush-queues function
-func FlushQueues(timeout time.Duration, nonBlocking bool) (int, string) {
+func FlushQueues(ctx context.Context, timeout time.Duration, nonBlocking bool) ResponseExtra {
 	reqURL := setting.LocalURL + "api/internal/manager/flush-queues"
-
-	req := newInternalRequest(reqURL, "POST")
+	req := newInternalRequestAPI(ctx, reqURL, "POST", FlushOptions{Timeout: int64(timeout), NonBlocking: nonBlocking})
 	if timeout > 0 {
-		req.SetTimeout(timeout+10*time.Second, timeout+10*time.Second)
+		req.SetReadWriteTimeout(timeout + 10*time.Second)
 	}
-	req = req.Header("Content-Type", "application/json")
-	jsonBytes, _ := json.Marshal(FlushOptions{
-		Timeout:     timeout,
-		NonBlocking: nonBlocking,
-	})
-	req.Body(jsonBytes)
-	resp, err := req.Response()
-	if err != nil {
-		return http.StatusInternalServerError, fmt.Sprintf("Unable to contact gitea: %v", err.Error())
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return resp.StatusCode, decodeJSONError(resp).Err
-	}
-
-	return http.StatusOK, "Flushed"
+	return requestJSONClientMsg(req, "Flushed")
 }
 
 // PauseLogging pauses logging
-func PauseLogging() (int, string) {
+func PauseLogging(ctx context.Context) ResponseExtra {
 	reqURL := setting.LocalURL + "api/internal/manager/pause-logging"
-
-	req := newInternalRequest(reqURL, "POST")
-	resp, err := req.Response()
-	if err != nil {
-		return http.StatusInternalServerError, fmt.Sprintf("Unable to contact gitea: %v", err.Error())
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return resp.StatusCode, decodeJSONError(resp).Err
-	}
-
-	return http.StatusOK, "Logging Paused"
+	req := newInternalRequestAPI(ctx, reqURL, "POST")
+	return requestJSONClientMsg(req, "Logging Paused")
 }
 
 // ResumeLogging resumes logging
-func ResumeLogging() (int, string) {
+func ResumeLogging(ctx context.Context) ResponseExtra {
 	reqURL := setting.LocalURL + "api/internal/manager/resume-logging"
-
-	req := newInternalRequest(reqURL, "POST")
-	resp, err := req.Response()
-	if err != nil {
-		return http.StatusInternalServerError, fmt.Sprintf("Unable to contact gitea: %v", err.Error())
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return resp.StatusCode, decodeJSONError(resp).Err
-	}
-
-	return http.StatusOK, "Logging Restarted"
+	req := newInternalRequestAPI(ctx, reqURL, "POST")
+	return requestJSONClientMsg(req, "Logging Restarted")
 }
 
 // ReleaseReopenLogging releases and reopens logging files
-func ReleaseReopenLogging() (int, string) {
+func ReleaseReopenLogging(ctx context.Context) ResponseExtra {
 	reqURL := setting.LocalURL + "api/internal/manager/release-and-reopen-logging"
-
-	req := newInternalRequest(reqURL, "POST")
-	resp, err := req.Response()
-	if err != nil {
-		return http.StatusInternalServerError, fmt.Sprintf("Unable to contact gitea: %v", err.Error())
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return resp.StatusCode, decodeJSONError(resp).Err
-	}
-
-	return http.StatusOK, "Logging Restarted"
+	req := newInternalRequestAPI(ctx, reqURL, "POST")
+	return requestJSONClientMsg(req, "Logging Restarted")
 }
 
-// LoggerOptions represents the options for the add logger call
-type LoggerOptions struct {
-	Group  string
-	Name   string
-	Mode   string
-	Config map[string]interface{}
+// SetLogSQL sets database logging
+func SetLogSQL(ctx context.Context, on bool) ResponseExtra {
+	reqURL := setting.LocalURL + "api/internal/manager/set-log-sql?on=" + strconv.FormatBool(on)
+	req := newInternalRequestAPI(ctx, reqURL, "POST")
+	return requestJSONClientMsg(req, "Log SQL setting set")
 }
 
-// AddLogger adds a logger
-func AddLogger(group, name, mode string, config map[string]interface{}) (int, string) {
-	reqURL := setting.LocalURL + "api/internal/manager/add-logger"
+// Processes return the current processes from this gitea instance
+func Processes(ctx context.Context, out io.Writer, flat, noSystem, stacktraces, json bool, cancel string) ResponseExtra {
+	reqURL := setting.LocalURL + fmt.Sprintf("api/internal/manager/processes?flat=%t&no-system=%t&stacktraces=%t&json=%t&cancel-pid=%s", flat, noSystem, stacktraces, json, url.QueryEscape(cancel))
 
-	req := newInternalRequest(reqURL, "POST")
-	req = req.Header("Content-Type", "application/json")
-	jsonBytes, _ := json.Marshal(LoggerOptions{
-		Group:  group,
-		Name:   name,
-		Mode:   mode,
-		Config: config,
-	})
-	req.Body(jsonBytes)
-	resp, err := req.Response()
-	if err != nil {
-		return http.StatusInternalServerError, fmt.Sprintf("Unable to contact gitea: %v", err.Error())
+	req := newInternalRequestAPI(ctx, reqURL, "GET")
+	callback := func(resp *http.Response, extra *ResponseExtra) {
+		_, extra.Error = io.Copy(out, resp.Body)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return resp.StatusCode, decodeJSONError(resp).Err
-	}
-
-	return http.StatusOK, "Added"
-
-}
-
-// RemoveLogger removes a logger
-func RemoveLogger(group, name string) (int, string) {
-	reqURL := setting.LocalURL + fmt.Sprintf("api/internal/manager/remove-logger/%s/%s", url.PathEscape(group), url.PathEscape(name))
-
-	req := newInternalRequest(reqURL, "POST")
-	resp, err := req.Response()
-	if err != nil {
-		return http.StatusInternalServerError, fmt.Sprintf("Unable to contact gitea: %v", err.Error())
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return resp.StatusCode, decodeJSONError(resp).Err
-	}
-
-	return http.StatusOK, "Removed"
+	_, extra := requestJSONResp(req, &responseCallback{callback})
+	return extra
 }

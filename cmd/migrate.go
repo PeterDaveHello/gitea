@@ -1,40 +1,40 @@
 // Copyright 2018 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package cmd
 
 import (
 	"context"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/models/migrations"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
+	"gitea.dev/models/db"
+	"gitea.dev/modules/log"
+	"gitea.dev/modules/setting"
+	"gitea.dev/services/versioned_migration"
 
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v3"
 )
 
-// CmdMigrate represents the available migrate sub-command.
-var CmdMigrate = cli.Command{
-	Name:        "migrate",
-	Usage:       "Migrate the database",
-	Description: "This is a command for migrating the database, so that you can run gitea admin create-user before starting the server.",
-	Action:      runMigrate,
+func newMigrateCommand() *cli.Command {
+	return &cli.Command{
+		Name:        "migrate",
+		Usage:       "Migrate the database",
+		Description: `This is a command for migrating the database, so that you can run "gitea admin create user" before starting the server.`,
+		Action:      runMigrate,
+	}
 }
 
-func runMigrate(ctx *cli.Context) error {
-	if err := initDB(); err != nil {
+func runMigrate(ctx context.Context, c *cli.Command) error {
+	if err := initDB(ctx); err != nil {
 		return err
 	}
 
-	log.Trace("AppPath: %s", setting.AppPath)
-	log.Trace("AppWorkPath: %s", setting.AppWorkPath)
-	log.Trace("Custom path: %s", setting.CustomPath)
-	log.Trace("Log path: %s", setting.LogRootPath)
-	setting.InitDBConfig()
+	log.Info("AppPath: %s", setting.AppPath)
+	log.Info("AppWorkPath: %s", setting.AppWorkPath)
+	log.Info("Custom path: %s", setting.CustomPath)
+	log.Info("Log path: %s", setting.Log.RootPath)
+	log.Info("Configuration file: %s", setting.CustomConf)
 
-	if err := models.NewEngine(context.Background(), migrations.Migrate); err != nil {
+	if err := db.InitEngineWithMigration(context.Background(), versioned_migration.Migrate); err != nil {
 		log.Fatal("Failed to initialize ORM engine: %v", err)
 		return err
 	}

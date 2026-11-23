@@ -1,18 +1,17 @@
 // Copyright 2015 The Gogs Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package admin
 
 import (
-	"code.gitea.io/gitea/modules/context"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/routers/api/v1/repo"
-	"code.gitea.io/gitea/routers/api/v1/user"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/modules/web"
+	"gitea.dev/routers/api/v1/repo"
+	"gitea.dev/services/context"
 )
 
 // CreateRepo api for creating a repository
-func CreateRepo(ctx *context.APIContext, form api.CreateRepoOption) {
+func CreateRepo(ctx *context.APIContext) {
 	// swagger:operation POST /admin/users/{username}/repos admin adminCreateRepo
 	// ---
 	// summary: Create a repository on behalf of a user
@@ -23,7 +22,7 @@ func CreateRepo(ctx *context.APIContext, form api.CreateRepoOption) {
 	// parameters:
 	// - name: username
 	//   in: path
-	//   description: username of the user. This user will own the created repository
+	//   description: username of the user who will own the created repository
 	//   type: string
 	//   required: true
 	// - name: repository
@@ -33,19 +32,10 @@ func CreateRepo(ctx *context.APIContext, form api.CreateRepoOption) {
 	// responses:
 	//   "201":
 	//     "$ref": "#/responses/Repository"
-	//   "403":
-	//     "$ref": "#/responses/forbidden"
-	//   "404":
-	//     "$ref": "#/responses/notFound"
-	//   "409":
+	//   default:
 	//     "$ref": "#/responses/error"
-	//   "422":
-	//     "$ref": "#/responses/validationError"
 
-	owner := user.GetUserByParams(ctx)
-	if ctx.Written() {
-		return
-	}
+	form := web.GetForm[*api.CreateRepoOption](ctx)
 
-	repo.CreateUserRepo(ctx, owner, form)
+	repo.CreateUserRepo(ctx, ctx.ContextUser, *form)
 }

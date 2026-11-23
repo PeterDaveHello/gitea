@@ -1,129 +1,166 @@
 // Copyright 2017 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package code
 
 import (
-	"bytes"
+	"context"
+	"html"
+	"html/template"
 	"strings"
+	"unicode/utf8"
 
-	"code.gitea.io/gitea/modules/highlight"
-	"code.gitea.io/gitea/modules/timeutil"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/modules/highlight"
+	"gitea.dev/modules/indexer/code/internal"
+	"gitea.dev/modules/util"
 )
 
-// Result a search result to display
-type Result struct {
-	RepoID         int64
-	Filename       string
-	CommitID       string
-	UpdatedUnix    timeutil.TimeStamp
-	Language       string
-	Color          string
-	LineNumbers    []int
-	FormattedLines string
+type Result = internal.SearchResult
+
+const (
+	MaxResultFragments    = 10
+	MaxResultFragmentSize = 4 * 1024
+)
+
+type ResultFragment struct {
+	StartLine int
+	Content   string       // UTF-8 clipped at a rune boundary
+	Matches   []MatchRange // byte ranges into Content
 }
 
-func indices(content string, selectionStartIndex, selectionEndIndex int) (int, int) {
-	startIndex := selectionStartIndex
-	numLinesBefore := 0
-	for ; startIndex > 0; startIndex-- {
-		if content[startIndex-1] == '\n' {
-			if numLinesBefore == 1 {
-				break
+type ResultLine struct {
+	Num              int
+	FormattedContent template.HTML
+}
+
+type SearchResultLanguages = internal.SearchResultLanguages
+
+type MatchRange = internal.MatchRange
+
+type SearchOptions = internal.SearchOptions
+
+func HighlightSearchResultCode(filename, language string, lineNums []int, code string, matches ...MatchRange) []*ResultLine {
+	// we should highlight the whole code block first, otherwise it doesn't work well with multiple line highlighting
+	lexer := highlight.DetectChromaLexerByFileName(filename, language)
+	hl := markMatches(code, string(highlight.RenderCodeByLexer(lexer, code)), matches)
+	highlightedLines := highlight.UnsafeSplitHighlightedLines(template.HTML(hl))
+
+	// The lineNums outputted by render might not match the original lineNums, because "highlight" removes the last `\n`
+	lines := make([]*ResultLine, min(len(highlightedLines), len(lineNums)))
+	for i := range lines {
+		lines[i] = &ResultLine{
+			Num:              lineNums[i],
+			FormattedContent: template.HTML(highlightedLines[i]),
+		}
+	}
+	return lines
+}
+
+// markMatches wraps the code byte ranges in <mark>, split at tags, skipping code bytes the lexer dropped
+func markMatches(code, highlighted string, matches []MatchRange) string {
+	if len(matches) == 0 {
+		return highlighted
+	}
+	var marked strings.Builder
+	marked.Grow(len(highlighted))
+	offset, open := 0, false
+	for highlighted != "" {
+		var token string
+		switch highlighted[0] {
+		case '<':
+			token = highlighted[:strings.IndexByte(highlighted, '>')+1]
+			highlighted = highlighted[len(token):]
+			if open {
+				marked.WriteString("</mark>")
+				open = false
 			}
-			numLinesBefore++
+			marked.WriteString(token)
+			continue
+		case '&':
+			token = highlighted[:strings.IndexByte(highlighted, ';')+1]
+		default:
+			token = highlighted[:1]
 		}
+		highlighted = highlighted[len(token):]
+		text := html.UnescapeString(token)
+		for offset < len(code) && !strings.HasPrefix(code[offset:], text) {
+			offset++
+		}
+		for len(matches) > 0 && matches[0].End <= offset {
+			matches = matches[1:]
+		}
+		if inMatch := len(matches) > 0 && matches[0].Start <= offset; inMatch != open {
+			marked.WriteString(util.Iif(inMatch, "<mark>", "</mark>"))
+			open = inMatch
+		}
+		marked.WriteString(token)
+		offset += len(text)
 	}
-
-	endIndex := selectionEndIndex
-	numLinesAfter := 0
-	for ; endIndex < len(content); endIndex++ {
-		if content[endIndex] == '\n' {
-			if numLinesAfter == 1 {
-				break
-			}
-			numLinesAfter++
-		}
+	if open {
+		marked.WriteString("</mark>")
 	}
-
-	return startIndex, endIndex
-}
-
-func writeStrings(buf *bytes.Buffer, strs ...string) error {
-	for _, s := range strs {
-		_, err := buf.WriteString(s)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func searchResult(result *SearchResult, startIndex, endIndex int) (*Result, error) {
-	startLineNum := 1 + strings.Count(result.Content[:startIndex], "\n")
-
-	var formattedLinesBuffer bytes.Buffer
-
-	contentLines := strings.SplitAfter(result.Content[startIndex:endIndex], "\n")
-	lineNumbers := make([]int, len(contentLines))
-	index := startIndex
-	for i, line := range contentLines {
-		var err error
-		if index < result.EndIndex &&
-			result.StartIndex < index+len(line) &&
-			result.StartIndex < result.EndIndex {
-			openActiveIndex := util.Max(result.StartIndex-index, 0)
-			closeActiveIndex := util.Min(result.EndIndex-index, len(line))
-			err = writeStrings(&formattedLinesBuffer,
-				line[:openActiveIndex],
-				line[openActiveIndex:closeActiveIndex],
-				line[closeActiveIndex:],
-			)
-		} else {
-			err = writeStrings(&formattedLinesBuffer,
-				line,
-			)
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		lineNumbers[i] = startLineNum + i
-		index += len(line)
-	}
-	return &Result{
-		RepoID:         result.RepoID,
-		Filename:       result.Filename,
-		CommitID:       result.CommitID,
-		UpdatedUnix:    result.UpdatedUnix,
-		Language:       result.Language,
-		Color:          result.Color,
-		LineNumbers:    lineNumbers,
-		FormattedLines: highlight.Code(result.Filename, formattedLinesBuffer.String()),
-	}, nil
+	return marked.String()
 }
 
 // PerformSearch perform a search on a repository
-func PerformSearch(repoIDs []int64, language, keyword string, page, pageSize int) (int, []*Result, []*SearchResultLanguages, error) {
-	if len(keyword) == 0 {
+func PerformSearch(ctx context.Context, opts *SearchOptions) (int64, []*Result, []*SearchResultLanguages, error) {
+	if opts == nil || len(opts.Terms) == 0 {
 		return 0, nil, nil, nil
 	}
+	return (*globalIndexer.Load()).Search(ctx, opts)
+}
 
-	total, results, resultLanguages, err := indexer.Search(repoIDs, language, keyword, page, pageSize)
-	if err != nil {
-		return 0, nil, nil, err
+func BuildResultFragments(content string, matches []MatchRange) []*ResultFragment {
+	if len(matches) == 0 {
+		return nil
 	}
-
-	displayResults := make([]*Result, len(results))
-
-	for i, result := range results {
-		startIndex, endIndex := indices(result.Content, result.StartIndex, result.EndIndex)
-		displayResults[i], err = searchResult(result, startIndex, endIndex)
-		if err != nil {
-			return 0, nil, nil, err
+	var blocks []MatchRange
+	for _, match := range matches {
+		lineStart := strings.LastIndexByte(content[:match.Start], '\n') + 1
+		start := strings.LastIndexByte(content[:max(0, lineStart-1)], '\n') + 1
+		_, matchRuneSize := utf8.DecodeRuneInString(content[match.Start:match.End])
+		if match.Start+matchRuneSize-start > MaxResultFragmentSize {
+			start = lineStart
+			if match.Start+matchRuneSize-start > MaxResultFragmentSize {
+				start = match.Start
+			}
 		}
+		end := match.End - 1
+		limit := min(len(content), end+MaxResultFragmentSize+utf8.UTFMax) // fragments are truncated to MaxResultFragmentSize anyway
+		for range 2 {
+			newline := strings.IndexByte(content[end:limit], '\n')
+			if newline < 0 {
+				end = limit
+				break
+			}
+			end += newline + 1
+		}
+		if len(blocks) > 0 && start <= blocks[len(blocks)-1].End {
+			previous := &blocks[len(blocks)-1]
+			mergedEnd := previous.Start + len(util.TruncateStringBytes(content[previous.Start:max(previous.End, end)], MaxResultFragmentSize))
+			if match.Start+matchRuneSize <= mergedEnd {
+				previous.End = mergedEnd
+				continue
+			}
+			start = previous.End
+		}
+		if len(blocks) == MaxResultFragments {
+			break
+		}
+		blocks = append(blocks, MatchRange{Start: start, End: start + len(util.TruncateStringBytes(content[start:end], MaxResultFragmentSize))})
 	}
-	return int(total), displayResults, resultLanguages, nil
+	var fragments []*ResultFragment
+	for _, block := range blocks {
+		fragment := &ResultFragment{StartLine: 1 + strings.Count(content[:block.Start], "\n"), Content: content[block.Start:block.End]}
+		for _, match := range matches {
+			if match.Start < block.End && match.End > block.Start {
+				fragment.Matches = append(fragment.Matches, MatchRange{
+					Start: max(match.Start, block.Start) - block.Start,
+					End:   min(match.End, block.End) - block.Start,
+				})
+			}
+		}
+		fragments = append(fragments, fragment)
+	}
+	return fragments
 }

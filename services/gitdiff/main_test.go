@@ -1,16 +1,18 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package gitdiff
 
 import (
-	"path/filepath"
 	"testing"
 
-	"code.gitea.io/gitea/models"
+	"gitea.dev/models/unittest"
+
+	_ "gitea.dev/models"
+	_ "gitea.dev/models/actions"
+	_ "gitea.dev/models/activities"
 )
 
 func TestMain(m *testing.M) {
-	models.MainTest(m, filepath.Join("..", ".."))
+	unittest.MainTest(m)
 }

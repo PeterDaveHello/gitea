@@ -1,11 +1,10 @@
 // Copyright 2017 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package swagger
 
 import (
-	api "code.gitea.io/gitea/modules/structs"
+	api "gitea.dev/modules/structs"
 )
 
 // Repository
@@ -71,11 +70,18 @@ type swaggerResponseAnnotatedTag struct {
 	Body api.AnnotatedTag `json:"body"`
 }
 
-// Reference
-// swagger:response Reference
-type swaggerResponseReference struct {
+// TagProtectionList
+// swagger:response TagProtectionList
+type swaggerResponseTagProtectionList struct {
 	// in:body
-	Body api.Reference `json:"body"`
+	Body []api.TagProtection `json:"body"`
+}
+
+// TagProtection
+// swagger:response TagProtection
+type swaggerResponseTagProtection struct {
+	// in:body
+	Body api.TagProtection `json:"body"`
 }
 
 // ReferenceList
@@ -97,6 +103,20 @@ type swaggerResponseHook struct {
 type swaggerResponseHookList struct {
 	// in:body
 	Body []api.Hook `json:"body"`
+}
+
+// HookDelivery
+// swagger:response HookDelivery
+type swaggerResponseHookDelivery struct {
+	// in:body
+	Body api.HookDelivery `json:"body"`
+}
+
+// HookDeliveryList
+// swagger:response HookDeliveryList
+type swaggerResponseHookDeliveryList struct {
+	// in:body
+	Body []api.HookDelivery `json:"body"`
 }
 
 // GitHook
@@ -169,18 +189,18 @@ type swaggerResponsePullReviewCommentList struct {
 	Body []api.PullReviewComment `json:"body"`
 }
 
-// Status
-// swagger:response Status
+// CommitStatus
+// swagger:response CommitStatus
 type swaggerResponseStatus struct {
 	// in:body
-	Body api.Status `json:"body"`
+	Body api.CommitStatus `json:"body"`
 }
 
-// StatusList
-// swagger:response StatusList
-type swaggerResponseStatusList struct {
+// CommitStatusList
+// swagger:response CommitStatusList
+type swaggerResponseCommitStatusList struct {
 	// in:body
-	Body []api.Status `json:"body"`
+	Body []api.CommitStatus `json:"body"`
 }
 
 // WatchInfo
@@ -242,7 +262,7 @@ type swaggerCommitList struct {
 	PerPage int `json:"X-PerPage"`
 
 	// Total commit count
-	Total int `json:"X-Total"`
+	Total int `json:"X-Total-Count"`
 
 	// Total number of pages
 	PageCount int `json:"X-PageCount"`
@@ -254,11 +274,33 @@ type swaggerCommitList struct {
 	Body []api.Commit `json:"body"`
 }
 
-// EmptyRepository
-// swagger:response EmptyRepository
-type swaggerEmptyRepository struct {
+// ChangedFileList
+// swagger:response ChangedFileList
+type swaggerChangedFileList struct {
+	// The current page
+	Page int `json:"X-Page"`
+
+	// Files per page
+	PerPage int `json:"X-PerPage"`
+
+	// Total file count
+	Total int `json:"X-Total-Count"`
+
+	// Total number of pages
+	PageCount int `json:"X-PageCount"`
+
+	// True if there is another page
+	HasMore bool `json:"X-HasMore"`
+
 	// in: body
-	Body api.APIError `json:"body"`
+	Body []api.ChangedFile `json:"body"`
+}
+
+// Note
+// swagger:response Note
+type swaggerNote struct {
+	// in: body
+	Body api.Note `json:"body"`
 }
 
 // FileResponse
@@ -266,6 +308,13 @@ type swaggerEmptyRepository struct {
 type swaggerFileResponse struct {
 	// in: body
 	Body api.FileResponse `json:"body"`
+}
+
+// FilesResponse
+// swagger:response FilesResponse
+type swaggerFilesResponse struct {
+	// in: body
+	Body api.FilesResponse `json:"body"`
 }
 
 // ContentsResponse
@@ -282,6 +331,12 @@ type swaggerContentsListResponse struct {
 	Body []api.ContentsResponse `json:"body"`
 }
 
+// swagger:response ContentsExtResponse
+type swaggerContentsExtResponse struct {
+	// in:body
+	Body api.ContentsExtResponse `json:"body"`
+}
+
 // FileDeleteResponse
 // swagger:response FileDeleteResponse
 type swaggerFileDeleteResponse struct {
@@ -293,7 +348,7 @@ type swaggerFileDeleteResponse struct {
 // swagger:response TopicListResponse
 type swaggerTopicListResponse struct {
 	// in: body
-	Body []api.TopicResponse `json:"body"`
+	Body api.TopicListResponse `json:"body"`
 }
 
 // TopicNames
@@ -308,4 +363,163 @@ type swaggerTopicNames struct {
 type swaggerLanguageStatistics struct {
 	// in: body
 	Body map[string]int64 `json:"body"`
+}
+
+// LicensesList
+// swagger:response LicensesList
+type swaggerLicensesList struct {
+	// in: body
+	Body []string `json:"body"`
+}
+
+// CombinedStatus
+// swagger:response CombinedStatus
+type swaggerCombinedStatus struct {
+	// in: body
+	Body api.CombinedStatus `json:"body"`
+}
+
+// WikiPageList
+// swagger:response WikiPageList
+type swaggerWikiPageList struct {
+	// in:body
+	Body []api.WikiPageMetaData `json:"body"`
+}
+
+// WikiPage
+// swagger:response WikiPage
+type swaggerWikiPage struct {
+	// in:body
+	Body api.WikiPage `json:"body"`
+}
+
+// WikiCommitList
+// swagger:response WikiCommitList
+type swaggerWikiCommitList struct {
+	// in:body
+	Body api.WikiCommitList `json:"body"`
+}
+
+// PushMirror
+// swagger:response PushMirror
+type swaggerPushMirror struct {
+	// in:body
+	Body api.PushMirror `json:"body"`
+}
+
+// PushMirrorList
+// swagger:response PushMirrorList
+type swaggerPushMirrorList struct {
+	// in:body
+	Body []api.PushMirror `json:"body"`
+}
+
+// RepoCollaboratorPermission
+// swagger:response RepoCollaboratorPermission
+type swaggerRepoCollaboratorPermission struct {
+	// in:body
+	Body api.RepoCollaboratorPermission `json:"body"`
+}
+
+// RepoIssueConfig
+// swagger:response RepoIssueConfig
+type swaggerRepoIssueConfig struct {
+	// in:body
+	Body api.IssueConfig `json:"body"`
+}
+
+// RepoIssueConfigValidation
+// swagger:response RepoIssueConfigValidation
+type swaggerRepoIssueConfigValidation struct {
+	// in:body
+	Body api.IssueConfigValidation `json:"body"`
+}
+
+// RepoNewIssuePinsAllowed
+// swagger:response RepoNewIssuePinsAllowed
+type swaggerRepoNewIssuePinsAllowed struct {
+	// in:body
+	Body api.NewIssuePinsAllowed `json:"body"`
+}
+
+// TasksList
+// swagger:response TasksList
+type swaggerRepoTasksList struct {
+	// in:body
+	Body api.ActionTaskResponse `json:"body"`
+}
+
+// WorkflowRunsList
+// swagger:response WorkflowRunsList
+type swaggerActionWorkflowRunsResponse struct {
+	// in:body
+	Body api.ActionWorkflowRunsResponse `json:"body"`
+}
+
+// WorkflowRun
+// swagger:response WorkflowRun
+type swaggerWorkflowRun struct {
+	// in:body
+	Body api.ActionWorkflowRun `json:"body"`
+}
+
+// WorkflowJobsList
+// swagger:response WorkflowJobsList
+type swaggerActionWorkflowJobsResponse struct {
+	// in:body
+	Body api.ActionWorkflowJobsResponse `json:"body"`
+}
+
+// WorkflowJob
+// swagger:response WorkflowJob
+type swaggerWorkflowJob struct {
+	// in:body
+	Body api.ActionWorkflowJob `json:"body"`
+}
+
+// ArtifactsList
+// swagger:response ArtifactsList
+type swaggerRepoArtifactsList struct {
+	// in:body
+	Body api.ActionArtifactsResponse `json:"body"`
+}
+
+// Artifact
+// swagger:response Artifact
+type swaggerRepoArtifact struct {
+	// in:body
+	Body api.ActionArtifact `json:"body"`
+}
+
+// RunnerList
+// swagger:response RunnerList
+type swaggerRunnerList struct {
+	// in:body
+	Body api.ActionRunnersResponse `json:"body"`
+}
+
+// Runner
+// swagger:response Runner
+type swaggerRunner struct {
+	// in:body
+	Body api.ActionRunner `json:"body"`
+}
+
+// swagger:response Compare
+type swaggerCompare struct {
+	// in:body
+	Body api.Compare `json:"body"`
+}
+
+// swagger:response MergeUpstreamResponse
+type swaggerMergeUpstreamResponse struct {
+	// in:body
+	Body api.MergeUpstreamResponse `json:"body"`
+}
+
+// CodeSearchResults
+// swagger:response CodeSearchResults
+type swaggerResponseCodeSearchResults struct {
+	// in:body
+	Body api.CodeSearchResults `json:"body"`
 }

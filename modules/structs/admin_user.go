@@ -1,43 +1,81 @@
 // Copyright 2015 The Gogs Authors. All rights reserved.
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package structs
 
+import "time"
+
 // CreateUserOption create user options
 type CreateUserOption struct {
-	SourceID  int64  `json:"source_id"`
+	// The authentication source ID to associate with the user
+	SourceID int64 `json:"source_id"`
+	// identifier of the user, provided by the external authenticator (if configured)
 	LoginName string `json:"login_name"`
+	// username of the user
 	// required: true
-	Username string `json:"username" binding:"Required;AlphaDashDot;MaxSize(40)"`
+	Username string `json:"username" binding:"Required;Username;MaxSize(40)"`
+	// The full display name of the user
 	FullName string `json:"full_name" binding:"MaxSize(100)"`
 	// required: true
-	// swagger:strfmt email
 	Email string `json:"email" binding:"Required;Email;MaxSize(254)"`
-	// required: true
-	Password           string `json:"password" binding:"Required;MaxSize(255)"`
-	MustChangePassword *bool  `json:"must_change_password"`
-	SendNotify         bool   `json:"send_notify"`
+	// The plain text password for the user
+	Password string `json:"password" binding:"MaxSize(255)"`
+	// Whether the user must change password on first login
+	MustChangePassword *bool `json:"must_change_password"`
+	// Whether to send welcome notification email to the user
+	SendNotify bool `json:"send_notify"`
+	// Whether the user has restricted access privileges
+	Restricted *bool `json:"restricted"`
+	// User visibility level: public, limited, or private
+	Visibility VisibilityString `json:"visibility" binding:"In(,public,limited,private)"`
+
+	// For explicitly setting the user creation timestamp. Useful when users are
+	// migrated from other systems. When omitted, the user's creation timestamp
+	// will be set to "now".
+	Created *time.Time `json:"created_at"`
 }
 
 // EditUserOption edit user options
 type EditUserOption struct {
-	SourceID  int64  `json:"source_id"`
-	LoginName string `json:"login_name"`
-	FullName  string `json:"full_name" binding:"MaxSize(100)"`
 	// required: true
+	// The authentication source ID to associate with the user
+	SourceID int64 `json:"source_id"`
+	// identifier of the user, provided by the external authenticator (if configured)
+	LoginName *string `json:"login_name"`
 	// swagger:strfmt email
-	Email                   string `json:"email" binding:"Required;Email;MaxSize(254)"`
-	Password                string `json:"password" binding:"MaxSize(255)"`
-	MustChangePassword      *bool  `json:"must_change_password"`
-	Website                 string `json:"website" binding:"MaxSize(50)"`
-	Location                string `json:"location" binding:"MaxSize(50)"`
-	Active                  *bool  `json:"active"`
-	Admin                   *bool  `json:"admin"`
-	AllowGitHook            *bool  `json:"allow_git_hook"`
-	AllowImportLocal        *bool  `json:"allow_import_local"`
-	MaxRepoCreation         *int   `json:"max_repo_creation"`
-	ProhibitLogin           *bool  `json:"prohibit_login"`
-	AllowCreateOrganization *bool  `json:"allow_create_organization"`
+	// The email address of the user
+	Email *string `json:"email" binding:"MaxSize(254)"`
+	// The full display name of the user
+	FullName *string `json:"full_name" binding:"MaxSize(100)"`
+	// The plain text password for the user
+	Password string `json:"password" binding:"MaxSize(255)"`
+	// Whether the user must change password on next login
+	MustChangePassword *bool `json:"must_change_password"`
+	// The user's personal website URL
+	Website *string `json:"website" binding:"ValidUrl;MaxSize(255)"`
+	// The user's location or address
+	Location *string `json:"location" binding:"MaxSize(50)"`
+	// The user's personal description or bio
+	Description *string `json:"description" binding:"MaxSize(255)"`
+	// Whether the user account is active
+	Active *bool `json:"active"`
+	// Whether the user has administrator privileges
+	Admin *bool `json:"admin"`
+	// Whether the user can use Git hooks
+	AllowGitHook *bool `json:"allow_git_hook"`
+	// Whether the user can import local repositories
+	AllowImportLocal *bool `json:"allow_import_local"`
+	// Maximum number of repositories the user can create
+	MaxRepoCreation *int `json:"max_repo_creation"`
+	// Whether the user is prohibited from logging in
+	ProhibitLogin *bool `json:"prohibit_login"`
+	// Whether the user can create organizations
+	AllowCreateOrganization *bool `json:"allow_create_organization"`
+	// Whether the user has restricted access privileges
+	Restricted *bool `json:"restricted"`
+	// User visibility level: public, limited, or private
+	Visibility VisibilityString `json:"visibility" binding:"In(,public,limited,private)"`
+	// The user type
+	Type UserTypeString `json:"type" binding:"In(User,Organization,Bot)"`
 }

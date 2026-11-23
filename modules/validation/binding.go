@@ -1,134 +1,127 @@
 // Copyright 2017 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package validation
 
 import (
-	"fmt"
+	"context"
+	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 
-	"gitea.com/macaron/binding"
-	"github.com/gobwas/glob"
+	"gitea.dev/modules/auth"
+	"gitea.dev/modules/git"
+	"gitea.dev/modules/glob"
+	"gitea.dev/modules/web/binding"
 )
 
 const (
-	// ErrGitRefName is git reference name error
-	ErrGitRefName = "GitRefNameError"
-
-	// ErrGlobPattern is returned when glob pattern is invalid
-	ErrGlobPattern = "GlobPattern"
+	ErrCustomMessage       = "CustomMessage"
+	ErrEmail               = "EmailError"
+	ErrURL                 = "UrlError"
+	ErrGitRefName          = "GitRefNameError"
+	ErrGlobPattern         = "GlobPattern"
+	ErrRegexPattern        = "RegexPattern"
+	ErrUsername            = "UsernameError"
+	ErrInvalidGroupTeamMap = "InvalidGroupTeamMap"
+	ErrInvalidBadgeSlug    = "InvalidBadgeSlug"
 )
 
-var (
-	// GitRefNamePatternInvalid is regular expression with unallowed characters in git reference name
-	// They cannot have ASCII control characters (i.e. bytes whose values are lower than \040, or \177 DEL), space, tilde ~, caret ^, or colon : anywhere.
-	// They cannot have question-mark ?, asterisk *, or open bracket [ anywhere
-	GitRefNamePatternInvalid = regexp.MustCompile(`[\000-\037\177 \\~^:?*[]+`)
-)
+func newFieldError(field reflect.StructField, cls, msg string) *BindingError {
+	return &BindingError{FieldNames: []string{field.Name}, Classification: cls, Message: msg}
+}
 
-// CheckGitRefAdditionalRulesValid check name is valid on additional rules
-func CheckGitRefAdditionalRulesValid(name string) bool {
-
-	// Additional rules as described at https://www.kernel.org/pub/software/scm/git/docs/git-check-ref-format.html
-	if strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") ||
-		strings.HasSuffix(name, ".") || strings.Contains(name, "..") ||
-		strings.Contains(name, "//") || strings.Contains(name, "@{") ||
-		name == "@" {
-		return false
-	}
-	parts := strings.Split(name, "/")
-	for _, part := range parts {
-		if strings.HasSuffix(part, ".lock") || strings.HasPrefix(part, ".") {
-			return false
-		}
-	}
-
-	return true
+func AddValidationError(errs BindingErrors, fieldName, errorMsg string) BindingErrors {
+	return append(errs, BindingError{FieldNames: []string{fieldName}, Classification: ErrCustomMessage, Message: errorMsg})
 }
 
 // AddBindingRules adds additional binding rules
-func AddBindingRules() {
-	addGitRefNameBindingRule()
-	addValidURLBindingRule()
-	addGlobPatternRule()
-}
-
-func addGitRefNameBindingRule() {
-	// Git refname validation rule
-	binding.AddRule(&binding.Rule{
-		IsMatch: func(rule string) bool {
-			return strings.HasPrefix(rule, "GitRefName")
-		},
-		IsValid: func(errs binding.Errors, name string, val interface{}) (bool, binding.Errors) {
-			str := fmt.Sprintf("%v", val)
-
-			if GitRefNamePatternInvalid.MatchString(str) {
-				errs.Add([]string{name}, ErrGitRefName, "GitRefName")
-				return false, errs
-			}
-
-			if !CheckGitRefAdditionalRulesValid(str) {
-				errs.Add([]string{name}, ErrGitRefName, "GitRefName")
-				return false, errs
-			}
-
-			return true, errs
-		},
+func AddBindingRules(b *binding.Binder) {
+	b.AddRuleNonZero("Email", func(_ context.Context, f *binding.ValidationField) *binding.Error {
+		if !IsEmailAddressValid(f.ValueMustString()) {
+			return newFieldError(f.StructField, ErrEmail, "invalid email")
+		}
+		return nil
 	})
-}
 
-func addValidURLBindingRule() {
-	// URL validation rule
-	binding.AddRule(&binding.Rule{
-		IsMatch: func(rule string) bool {
-			return strings.HasPrefix(rule, "ValidUrl")
-		},
-		IsValid: func(errs binding.Errors, name string, val interface{}) (bool, binding.Errors) {
-			str := fmt.Sprintf("%v", val)
-			if len(str) != 0 && !IsValidURL(str) {
-				errs.Add([]string{name}, binding.ERR_URL, "Url")
-				return false, errs
-			}
-
-			return true, errs
-		},
+	b.AddRuleNonZero("GitRefName", func(ctx context.Context, f *binding.ValidationField) *binding.Error {
+		if !git.IsValidRefPattern(f.ValueMustString()) {
+			return newFieldError(f.StructField, ErrGitRefName, "GitRefName")
+		}
+		return nil
 	})
-}
+	b.AddRuleNonZero("ValidUrl", func(ctx context.Context, f *binding.ValidationField) *binding.Error {
+		if !IsValidURL(f.ValueMustString()) {
+			return newFieldError(f.StructField, ErrURL, "Url")
+		}
+		return nil
+	})
+	b.AddRuleNonZero("ValidSiteUrl", func(ctx context.Context, f *binding.ValidationField) *binding.Error {
+		if !IsValidSiteURL(f.ValueMustString()) {
+			return newFieldError(f.StructField, ErrURL, "Url")
+		}
+		return nil
+	})
+	b.AddRuleNonZero("BadgeSlug", func(ctx context.Context, f *binding.ValidationField) *binding.Error {
+		if !IsValidBadgeSlug(f.ValueMustString()) {
+			return newFieldError(f.StructField, ErrInvalidBadgeSlug, "invalid badge slug")
+		}
+		return nil
+	})
 
-func addGlobPatternRule() {
-	binding.AddRule(&binding.Rule{
-		IsMatch: func(rule string) bool {
-			return rule == "GlobPattern"
-		},
-		IsValid: func(errs binding.Errors, name string, val interface{}) (bool, binding.Errors) {
-			str := fmt.Sprintf("%v", val)
+	ruleGlobPattern := func(_ context.Context, f *binding.ValidationField) *binding.Error {
+		if _, err := glob.Compile(f.ValueMustString()); err != nil {
+			return newFieldError(f.StructField, ErrGlobPattern, err.Error())
+		}
+		return nil
+	}
+	b.AddRuleNonZero("GlobPattern", ruleGlobPattern)
+	ruleRegexPattern := func(_ context.Context, f *binding.ValidationField, val string) *binding.Error {
+		if _, err := regexp.Compile(val); err != nil {
+			return newFieldError(f.StructField, ErrRegexPattern, err.Error())
+		}
+		return nil
+	}
+	b.AddRuleNonZero("RegexPattern", func(ctx context.Context, f *binding.ValidationField) *binding.Error {
+		return ruleRegexPattern(ctx, f, f.ValueMustString())
+	})
+	b.AddRuleNonZero("GlobOrRegexPattern", func(ctx context.Context, f *binding.ValidationField) *binding.Error {
+		str := f.ValueMustString()
+		if len(str) >= 2 && strings.HasPrefix(str, "/") && strings.HasSuffix(str, "/") {
+			return ruleRegexPattern(ctx, f, str[1:len(str)-1])
+		}
+		return ruleGlobPattern(ctx, f)
+	})
 
-			if len(str) != 0 {
-				if _, err := glob.Compile(str); err != nil {
-					errs.Add([]string{name}, ErrGlobPattern, err.Error())
-					return false, errs
-				}
-			}
+	b.AddRuleNonZero("Username", func(ctx context.Context, f *binding.ValidationField) *binding.Error {
+		if !IsValidUsername(f.ValueMustString()) {
+			return newFieldError(f.StructField, ErrUsername, "invalid username")
+		}
+		return nil
+	})
 
-			return true, errs
-		},
+	b.AddRuleNonZero("ValidGroupTeamMap", func(ctx context.Context, f *binding.ValidationField) *binding.Error {
+		_, err := auth.UnmarshalGroupTeamMapping(f.ValueMustString())
+		if err != nil {
+			return newFieldError(f.StructField, ErrInvalidGroupTeamMap, err.Error())
+		}
+		return nil
 	})
 }
 
 func portOnly(hostport string) string {
-	colon := strings.IndexByte(hostport, ':')
-	if colon == -1 {
+	_, after, ok := strings.Cut(hostport, ":")
+	if !ok {
 		return ""
 	}
-	if i := strings.Index(hostport, "]:"); i != -1 {
-		return hostport[i+len("]:"):]
+	if _, after2, ok2 := strings.Cut(hostport, "]:"); ok2 {
+		return after2
 	}
 	if strings.Contains(hostport, "]") {
 		return ""
 	}
-	return hostport[colon+len(":"):]
+	return after
 }
 
 func validPort(p string) bool {
@@ -139,3 +132,14 @@ func validPort(p string) bool {
 	}
 	return true
 }
+
+var Binder = sync.OnceValue(func() *binding.Binder {
+	b := binding.NewBinder()
+	AddBindingRules(b)
+	return b
+})
+
+type (
+	BindingErrors = binding.Errors
+	BindingError  = binding.Error //exhaustruct:enforce
+)

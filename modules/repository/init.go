@@ -1,235 +1,156 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package repository
 
 import (
-	"bytes"
+	"context"
 	"fmt"
-	"io/ioutil"
-	"os"
 	"path/filepath"
+	"sort"
 	"strings"
-	"time"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/git"
-	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/util"
-
-	"github.com/mcuadros/go-version"
-	"github.com/unknwon/com"
+	issues_model "gitea.dev/models/issues"
+	"gitea.dev/modules/label"
+	"gitea.dev/modules/options"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/util"
 )
 
-func prepareRepoCommit(ctx models.DBContext, repo *models.Repository, tmpDir, repoPath string, opts models.CreateRepoOptions) error {
-	commitTimeStr := time.Now().Format(time.RFC3339)
-	authorSig := repo.Owner.NewGitSig()
+type OptionFile struct {
+	DisplayName string
+	Description string
+}
 
-	// Because this may call hooks we should pass in the environment
-	env := append(os.Environ(),
-		"GIT_AUTHOR_NAME="+authorSig.Name,
-		"GIT_AUTHOR_EMAIL="+authorSig.Email,
-		"GIT_AUTHOR_DATE="+commitTimeStr,
-		"GIT_COMMITTER_NAME="+authorSig.Name,
-		"GIT_COMMITTER_EMAIL="+authorSig.Email,
-		"GIT_COMMITTER_DATE="+commitTimeStr,
-	)
+var (
+	// Gitignores contains the gitiginore files
+	Gitignores []string
 
-	// Clone to temporary path and do the init commit.
-	if stdout, err := git.NewCommand("clone", repoPath, tmpDir).
-		SetDescription(fmt.Sprintf("prepareRepoCommit (git clone): %s to %s", repoPath, tmpDir)).
-		RunInDirWithEnv("", env); err != nil {
-		log.Error("Failed to clone from %v into %s: stdout: %s\nError: %v", repo, tmpDir, stdout, err)
-		return fmt.Errorf("git clone: %v", err)
-	}
+	// Licenses contains the license files
+	Licenses []string
 
-	// README
-	data, err := models.GetRepoInitFile("readme", opts.Readme)
-	if err != nil {
-		return fmt.Errorf("GetRepoInitFile[%s]: %v", opts.Readme, err)
-	}
+	// Readmes contains the readme files
+	Readmes []string
 
-	cloneLink := repo.CloneLink()
-	match := map[string]string{
-		"Name":           repo.Name,
-		"Description":    repo.Description,
-		"CloneURL.SSH":   cloneLink.SSH,
-		"CloneURL.HTTPS": cloneLink.HTTPS,
-		"OwnerName":      repo.OwnerName,
-	}
-	if err = ioutil.WriteFile(filepath.Join(tmpDir, "README.md"),
-		[]byte(com.Expand(string(data), match)), 0644); err != nil {
-		return fmt.Errorf("write README.md: %v", err)
-	}
+	// LabelTemplateFiles contains the label template files, each item has its DisplayName and Description
+	LabelTemplateFiles   []OptionFile
+	labelTemplateFileMap = map[string]string{} // DisplayName => FileName mapping
+)
 
-	// .gitignore
-	if len(opts.Gitignores) > 0 {
-		var buf bytes.Buffer
-		names := strings.Split(opts.Gitignores, ",")
-		for _, name := range names {
-			data, err = models.GetRepoInitFile("gitignore", name)
-			if err != nil {
-				return fmt.Errorf("GetRepoInitFile[%s]: %v", name, err)
-			}
-			buf.WriteString("# ---> " + name + "\n")
-			buf.Write(data)
-			buf.WriteString("\n")
-		}
+type optionFileList struct {
+	all    []string // all files provided by bindata & custom-path. Sorted.
+	custom []string // custom files provided by custom-path. Non-sorted, internal use only.
+}
 
-		if buf.Len() > 0 {
-			if err = ioutil.WriteFile(filepath.Join(tmpDir, ".gitignore"), buf.Bytes(), 0644); err != nil {
-				return fmt.Errorf("write .gitignore: %v", err)
-			}
+// mergeCustomLabelFiles merges the custom label files. Always use the file's main name (DisplayName) as the key to de-duplicate.
+func mergeCustomLabelFiles(fl optionFileList) []string {
+	exts := map[string]int{"": 0, ".yml": 1, ".yaml": 2} // "yaml" file has the highest priority to be used.
+
+	m := map[string]string{}
+	merge := func(list []string) {
+		sort.Slice(list, func(i, j int) bool { return exts[filepath.Ext(list[i])] < exts[filepath.Ext(list[j])] })
+		for _, f := range list {
+			m[strings.TrimSuffix(f, filepath.Ext(f))] = f
 		}
 	}
+	merge(fl.all)
+	merge(fl.custom)
 
-	// LICENSE
-	if len(opts.License) > 0 {
-		data, err = models.GetRepoInitFile("license", opts.License)
+	files := make([]string, 0, len(m))
+	for _, f := range m {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+	return files
+}
+
+// LoadRepoConfig loads the repository config
+func LoadRepoConfig() error {
+	types := []string{"gitignore", "license", "readme", "label"} // option file directories
+	typeFiles := make([]optionFileList, len(types))
+	for i, t := range types {
+		var err error
+		if typeFiles[i].all, err = options.AssetFS().ListFiles(t, true); err != nil {
+			return fmt.Errorf("failed to list %s files: %w", t, err)
+		}
+		sort.Strings(typeFiles[i].all)
+		customPath := filepath.Join(setting.CustomPath, "options", t)
+		if isDir, err := util.IsDir(customPath); err != nil {
+			return fmt.Errorf("failed to check custom %s dir: %w", t, err)
+		} else if isDir {
+			if typeFiles[i].custom, err = util.ListDirRecursively(customPath, &util.ListDirOptions{SkipCommonHiddenNames: true}); err != nil {
+				return fmt.Errorf("failed to list custom %s files: %w", t, err)
+			}
+		}
+	}
+
+	Gitignores = typeFiles[0].all
+	Licenses = typeFiles[1].all
+	Readmes = typeFiles[2].all
+
+	// Load label templates
+	LabelTemplateFiles = nil
+	labelTemplateFileMap = map[string]string{}
+	for _, file := range mergeCustomLabelFiles(typeFiles[3]) {
+		description, err := label.LoadTemplateDescription(file)
 		if err != nil {
-			return fmt.Errorf("GetRepoInitFile[%s]: %v", opts.License, err)
+			return fmt.Errorf("failed to load labels: %w", err)
 		}
-
-		if err = ioutil.WriteFile(filepath.Join(tmpDir, "LICENSE"), data, 0644); err != nil {
-			return fmt.Errorf("write LICENSE: %v", err)
-		}
+		displayName := strings.TrimSuffix(file, filepath.Ext(file))
+		labelTemplateFileMap[displayName] = file
+		LabelTemplateFiles = append(LabelTemplateFiles, OptionFile{DisplayName: displayName, Description: description})
 	}
 
+	// Filter out invalid names and promote preferred licenses.
+	sortedLicenses := make([]string, 0, len(Licenses))
+	for _, name := range setting.Repository.PreferredLicenses {
+		if util.SliceContainsString(Licenses, name, true) {
+			sortedLicenses = append(sortedLicenses, name)
+		}
+	}
+	for _, name := range Licenses {
+		if !util.SliceContainsString(setting.Repository.PreferredLicenses, name, true) {
+			sortedLicenses = append(sortedLicenses, name)
+		}
+	}
+	Licenses = sortedLicenses
 	return nil
 }
 
-// initRepoCommit temporarily changes with work directory.
-func initRepoCommit(tmpPath string, repo *models.Repository, u *models.User, defaultBranch string) (err error) {
-	commitTimeStr := time.Now().Format(time.RFC3339)
-
-	sig := u.NewGitSig()
-	// Because this may call hooks we should pass in the environment
-	env := append(os.Environ(),
-		"GIT_AUTHOR_NAME="+sig.Name,
-		"GIT_AUTHOR_EMAIL="+sig.Email,
-		"GIT_AUTHOR_DATE="+commitTimeStr,
-		"GIT_COMMITTER_NAME="+sig.Name,
-		"GIT_COMMITTER_EMAIL="+sig.Email,
-		"GIT_COMMITTER_DATE="+commitTimeStr,
-	)
-
-	if stdout, err := git.NewCommand("add", "--all").
-		SetDescription(fmt.Sprintf("initRepoCommit (git add): %s", tmpPath)).
-		RunInDir(tmpPath); err != nil {
-		log.Error("git add --all failed: Stdout: %s\nError: %v", stdout, err)
-		return fmt.Errorf("git add --all: %v", err)
-	}
-
-	binVersion, err := git.BinVersion()
+// InitializeLabels adds a label set to a repository using a template
+func InitializeLabels(ctx context.Context, id int64, labelTemplate string, isOrg bool) error {
+	list, err := LoadTemplateLabelsByDisplayName(labelTemplate)
 	if err != nil {
-		return fmt.Errorf("Unable to get git version: %v", err)
-	}
-
-	args := []string{
-		"commit", fmt.Sprintf("--author='%s <%s>'", sig.Name, sig.Email),
-		"-m", "Initial commit",
-	}
-
-	if version.Compare(binVersion, "1.7.9", ">=") {
-		sign, keyID, _ := models.SignInitialCommit(tmpPath, u)
-		if sign {
-			args = append(args, "-S"+keyID)
-		} else if version.Compare(binVersion, "2.0.0", ">=") {
-			args = append(args, "--no-gpg-sign")
-		}
-	}
-
-	if stdout, err := git.NewCommand(args...).
-		SetDescription(fmt.Sprintf("initRepoCommit (git commit): %s", tmpPath)).
-		RunInDirWithEnv(tmpPath, env); err != nil {
-		log.Error("Failed to commit: %v: Stdout: %s\nError: %v", args, stdout, err)
-		return fmt.Errorf("git commit: %v", err)
-	}
-
-	if len(defaultBranch) == 0 {
-		defaultBranch = setting.Repository.DefaultBranch
-	}
-
-	if stdout, err := git.NewCommand("push", "origin", "master:"+defaultBranch).
-		SetDescription(fmt.Sprintf("initRepoCommit (git push): %s", tmpPath)).
-		RunInDirWithEnv(tmpPath, models.InternalPushingEnvironment(u, repo)); err != nil {
-		log.Error("Failed to push back to master: Stdout: %s\nError: %v", stdout, err)
-		return fmt.Errorf("git push: %v", err)
-	}
-
-	return nil
-}
-
-func checkInitRepository(repoPath string) (err error) {
-	// Somehow the directory could exist.
-	if com.IsExist(repoPath) {
-		return fmt.Errorf("checkInitRepository: path already exists: %s", repoPath)
-	}
-
-	// Init git bare new repository.
-	if err = git.InitRepository(repoPath, true); err != nil {
-		return fmt.Errorf("git.InitRepository: %v", err)
-	} else if err = createDelegateHooks(repoPath); err != nil {
-		return fmt.Errorf("createDelegateHooks: %v", err)
-	}
-	return nil
-}
-
-// InitRepository initializes README and .gitignore if needed.
-func initRepository(ctx models.DBContext, repoPath string, u *models.User, repo *models.Repository, opts models.CreateRepoOptions) (err error) {
-	if err = checkInitRepository(repoPath); err != nil {
 		return err
 	}
 
-	// Initialize repository according to user's choice.
-	if opts.AutoInit {
-		tmpDir, err := ioutil.TempDir(os.TempDir(), "gitea-"+repo.Name)
-		if err != nil {
-			return fmt.Errorf("Failed to create temp dir for repository %s: %v", repo.RepoPath(), err)
+	labels := make([]*issues_model.Label, len(list))
+	for i := range list {
+		labels[i] = &issues_model.Label{
+			Name:           list[i].Name,
+			Exclusive:      list[i].Exclusive,
+			ExclusiveOrder: list[i].ExclusiveOrder,
+			Description:    list[i].Description,
+			Color:          list[i].Color,
 		}
-		defer func() {
-			if err := util.RemoveAll(tmpDir); err != nil {
-				log.Warn("Unable to remove temporary directory: %s: Error: %v", tmpDir, err)
-			}
-		}()
-
-		if err = prepareRepoCommit(ctx, repo, tmpDir, repoPath, opts); err != nil {
-			return fmt.Errorf("prepareRepoCommit: %v", err)
-		}
-
-		// Apply changes and commit.
-		if err = initRepoCommit(tmpDir, repo, u, opts.DefaultBranch); err != nil {
-			return fmt.Errorf("initRepoCommit: %v", err)
+		if isOrg {
+			labels[i].OrgID = id
+		} else {
+			labels[i].RepoID = id
 		}
 	}
-
-	// Re-fetch the repository from database before updating it (else it would
-	// override changes that were done earlier with sql)
-	if repo, err = models.GetRepositoryByIDCtx(ctx, repo.ID); err != nil {
-		return fmt.Errorf("getRepositoryByID: %v", err)
-	}
-
-	if !opts.AutoInit {
-		repo.IsEmpty = true
-	}
-
-	repo.DefaultBranch = "master"
-	if len(opts.DefaultBranch) > 0 {
-		repo.DefaultBranch = opts.DefaultBranch
-		gitRepo, err := git.OpenRepository(repo.RepoPath())
-		if err != nil {
-			return fmt.Errorf("openRepository: %v", err)
-		}
-		if err = gitRepo.SetDefaultBranch(repo.DefaultBranch); err != nil {
-			return fmt.Errorf("setDefaultBranch: %v", err)
+	for _, label := range labels {
+		if err = issues_model.NewLabel(ctx, label); err != nil {
+			return err
 		}
 	}
-
-	if err = models.UpdateRepositoryCtx(ctx, repo, false); err != nil {
-		return fmt.Errorf("updateRepository: %v", err)
-	}
-
 	return nil
+}
+
+// LoadTemplateLabelsByDisplayName loads a label template by its display name
+func LoadTemplateLabelsByDisplayName(displayName string) ([]*label.Label, error) {
+	if fileName, ok := labelTemplateFileMap[displayName]; ok {
+		return label.LoadTemplateFile(fileName)
+	}
+	return nil, label.ErrTemplateLoad{TemplateFile: displayName, OriginalError: fmt.Errorf("label template %q not found", displayName)}
 }

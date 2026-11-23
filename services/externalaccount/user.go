@@ -1,29 +1,28 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package externalaccount
 
 import (
+	"context"
+	"strconv"
 	"strings"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/structs"
+	audit_model "gitea.dev/models/audit"
+	issues_model "gitea.dev/models/issues"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	"gitea.dev/modules/structs"
+	"gitea.dev/services/audit"
 
 	"github.com/markbates/goth"
 )
 
-// LinkAccountToUser link the gothUser to the user
-func LinkAccountToUser(user *models.User, gothUser goth.User) error {
-	loginSource, err := models.GetActiveOAuth2LoginSourceByName(gothUser.Provider)
-	if err != nil {
-		return err
-	}
-
-	externalLoginUser := &models.ExternalLoginUser{
+func toExternalLoginUser(authSourceID int64, user *user_model.User, gothUser goth.User) *user_model.ExternalLoginUser {
+	return &user_model.ExternalLoginUser{
 		ExternalID:        gothUser.UserID,
 		UserID:            user.ID,
-		LoginSourceID:     loginSource.ID,
+		LoginSourceID:     authSourceID,
 		RawData:           gothUser.RawData,
 		Provider:          gothUser.Provider,
 		Email:             gothUser.Email,
@@ -39,10 +38,18 @@ func LinkAccountToUser(user *models.User, gothUser goth.User) error {
 		RefreshToken:      gothUser.RefreshToken,
 		ExpiresAt:         gothUser.ExpiresAt,
 	}
+}
 
-	if err := models.LinkExternalToUser(user, externalLoginUser); err != nil {
+// LinkAccountToUser link the gothUser to the user
+func LinkAccountToUser(ctx context.Context, authSourceID int64, user *user_model.User, gothUser goth.User) error {
+	externalLoginUser := toExternalLoginUser(authSourceID, user, gothUser)
+
+	if err := user_model.LinkExternalToUser(ctx, user, externalLoginUser); err != nil {
 		return err
 	}
+
+	audit.RecordAs(ctx, user, audit_model.UserExternalLoginAdd, user,
+		"external_id", externalLoginUser.ExternalID, "provider", externalLoginUser.Provider)
 
 	externalID := externalLoginUser.ExternalID
 
@@ -55,8 +62,44 @@ func LinkAccountToUser(user *models.User, gothUser goth.User) error {
 	}
 
 	if tp.Name() != "" {
-		return models.UpdateMigrationsByType(tp, externalID, user.ID)
+		return UpdateMigrationsByType(ctx, tp, externalID, user.ID)
 	}
 
 	return nil
+}
+
+// EnsureLinkExternalToUser link the gothUser to the user
+func EnsureLinkExternalToUser(ctx context.Context, authSourceID int64, user *user_model.User, gothUser goth.User) error {
+	externalLoginUser := toExternalLoginUser(authSourceID, user, gothUser)
+	inserted, err := user_model.EnsureLinkExternalToUser(ctx, externalLoginUser)
+	if inserted {
+		audit.RecordAs(ctx, user, audit_model.UserExternalLoginAdd, user,
+			"external_id", externalLoginUser.ExternalID, "provider", externalLoginUser.Provider)
+	}
+	return err
+}
+
+// UpdateMigrationsByType updates all migrated repositories' posterid from gitServiceType to replace originalAuthorID to posterID
+func UpdateMigrationsByType(ctx context.Context, tp structs.GitServiceType, externalUserID string, userID int64) error {
+	// Skip update if externalUserID is not a valid numeric ID or exceeds int64
+	if _, err := strconv.ParseInt(externalUserID, 10, 64); err != nil {
+		return nil
+	}
+
+	if err := issues_model.UpdateIssuesMigrationsByType(ctx, tp, externalUserID, userID); err != nil {
+		return err
+	}
+
+	if err := issues_model.UpdateCommentsMigrationsByType(ctx, tp, externalUserID, userID); err != nil {
+		return err
+	}
+
+	if err := repo_model.UpdateReleasesMigrationsByType(ctx, tp, externalUserID, userID); err != nil {
+		return err
+	}
+
+	if err := issues_model.UpdateReactionsMigrationsByType(ctx, tp, externalUserID, userID); err != nil {
+		return err
+	}
+	return issues_model.UpdateReviewsMigrationsByType(ctx, tp, externalUserID, userID)
 }

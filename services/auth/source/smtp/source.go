@@ -1,0 +1,51 @@
+// Copyright 2021 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
+package smtp
+
+import (
+	"gitea.dev/models/auth"
+	"gitea.dev/modules/json"
+)
+
+// Source holds configuration for the SMTP login source.
+type Source struct {
+	auth.ConfigBase `json:"-"`
+
+	Auth           string
+	Host           string
+	Port           int
+	AllowedDomains string `xorm:"TEXT"`
+	ForceSMTPS     bool
+	SkipVerify     bool
+	HeloHostname   string
+	DisableHelo    bool
+}
+
+func (source *Source) FromDB(bs []byte) error {
+	auth.UnmarshalAuthSourceConfig(bs, source)
+	return nil
+}
+
+func (source *Source) ToDB() ([]byte, error) {
+	return json.Marshal(source)
+}
+
+// IsSkipVerify returns if SkipVerify is set
+func (source *Source) IsSkipVerify() bool {
+	return source.SkipVerify
+}
+
+// HasTLS returns true for SMTP
+func (source *Source) HasTLS() bool {
+	return true
+}
+
+// UseTLS returns if TLS is set
+func (source *Source) UseTLS() bool {
+	return source.ForceSMTPS || source.Port == 465
+}
+
+func init() {
+	auth.RegisterTypeConfig(auth.SMTP, &Source{})
+}

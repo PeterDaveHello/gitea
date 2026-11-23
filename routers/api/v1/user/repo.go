@@ -1,49 +1,55 @@
 // Copyright 2017 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package user
 
 import (
 	"net/http"
-	"strconv"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/context"
-	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/routers/api/v1/utils"
+	access_model "gitea.dev/models/perm/access"
+	repo_model "gitea.dev/models/repo"
+	user_model "gitea.dev/models/user"
+	api "gitea.dev/modules/structs"
+	"gitea.dev/routers/api/v1/utils"
+	"gitea.dev/services/context"
+	"gitea.dev/services/convert"
 )
 
 // listUserRepos - List the repositories owned by the given user.
-func listUserRepos(ctx *context.APIContext, u *models.User, private bool) {
+func listUserRepos(ctx *context.APIContext, u *user_model.User, private bool) {
 	opts := utils.GetListOptions(ctx)
 
-	repos, count, err := models.GetUserRepositories(&models.SearchRepoOptions{
-		Actor:       u,
+	repos, count, err := repo_model.GetUserRepositories(ctx, repo_model.SearchRepoOptions{
+		OwnerID:     u.ID,
+		Actor:       ctx.Doer,
 		Private:     private,
 		ListOptions: opts,
 		OrderBy:     "id ASC",
 	})
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetUserRepositories", err)
+		ctx.APIErrorInternal(err)
+		return
+	}
+
+	if err := repos.LoadAttributes(ctx); err != nil {
+		ctx.APIErrorInternal(err)
 		return
 	}
 
 	apiRepos := make([]*api.Repository, 0, len(repos))
 	for i := range repos {
-		access, err := models.AccessLevel(ctx.User, repos[i])
+		permission, err := access_model.GetDoerRepoPermission(ctx, repos[i], ctx.Doer)
 		if err != nil {
-			ctx.Error(http.StatusInternalServerError, "AccessLevel", err)
+			ctx.APIErrorInternal(err)
 			return
 		}
-		if ctx.IsSigned && ctx.User.IsAdmin || access >= models.AccessModeRead {
-			apiRepos = append(apiRepos, repos[i].APIFormat(access))
+		if ctx.IsSigned && ctx.Doer.IsAdmin || permission.HasAnyUnitAccess() {
+			apiRepos = append(apiRepos, convert.ToRepo(ctx, repos[i], permission))
 		}
 	}
 
-	ctx.SetLinkHeader(int(count), opts.PageSize)
-	ctx.Header().Set("X-Total-Count", strconv.FormatInt(count, 10))
-	ctx.Header().Set("Access-Control-Expose-Headers", "X-Total-Count, Link")
+	ctx.SetLinkHeader(count, opts.PageSize)
+	ctx.SetTotalCountHeader(count)
 	ctx.JSON(http.StatusOK, &apiRepos)
 }
 
@@ -57,7 +63,7 @@ func ListUserRepos(ctx *context.APIContext) {
 	// parameters:
 	// - name: username
 	//   in: path
-	//   description: username of user
+	//   description: username of the user whose owned repos are to be listed
 	//   type: string
 	//   required: true
 	// - name: page
@@ -71,20 +77,17 @@ func ListUserRepos(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/RepositoryList"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	user := GetUserByParams(ctx)
-	if ctx.Written() {
-		return
-	}
-	private := ctx.IsSigned
-	listUserRepos(ctx, user, private)
+	listUserRepos(ctx, ctx.ContextUser, ctx.IsSigned)
 }
 
 // ListMyRepos - list the repositories you own or have access to.
 func ListMyRepos(ctx *context.APIContext) {
 	// swagger:operation GET /user/repos user userCurrentListRepos
 	// ---
-	// summary: List the repos that the authenticated user owns or has access to
+	// summary: List the repos that the authenticated user owns
 	// produces:
 	// - application/json
 	// parameters:
@@ -100,37 +103,36 @@ func ListMyRepos(ctx *context.APIContext) {
 	//   "200":
 	//     "$ref": "#/responses/RepositoryList"
 
-	opts := &models.SearchRepoOptions{
+	opts := repo_model.SearchRepoOptions{
 		ListOptions:        utils.GetListOptions(ctx),
-		Actor:              ctx.User,
-		OwnerID:            ctx.User.ID,
+		Actor:              ctx.Doer,
+		OwnerID:            ctx.Doer.ID,
 		Private:            ctx.IsSigned,
 		IncludeDescription: true,
 	}
 
-	var err error
-	repos, count, err := models.SearchRepository(opts)
+	repos, count, err := repo_model.SearchRepository(ctx, opts)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "SearchRepository", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
 	results := make([]*api.Repository, len(repos))
 	for i, repo := range repos {
-		if err = repo.GetOwner(); err != nil {
-			ctx.Error(http.StatusInternalServerError, "GetOwner", err)
+		if err = repo.LoadOwner(ctx); err != nil {
+			ctx.APIErrorInternal(err)
 			return
 		}
-		accessMode, err := models.AccessLevel(ctx.User, repo)
+		permission, err := access_model.GetDoerRepoPermission(ctx, repo, ctx.Doer)
 		if err != nil {
-			ctx.Error(http.StatusInternalServerError, "AccessLevel", err)
+			ctx.APIErrorInternal(err)
+			return
 		}
-		results[i] = repo.APIFormat(accessMode)
+		results[i] = convert.ToRepo(ctx, repo, permission)
 	}
 
-	ctx.SetLinkHeader(int(count), opts.ListOptions.PageSize)
-	ctx.Header().Set("X-Total-Count", strconv.FormatInt(count, 10))
-	ctx.Header().Set("Access-Control-Expose-Headers", "X-Total-Count, Link")
+	ctx.SetLinkHeader(count, opts.ListOptions.PageSize)
+	ctx.SetTotalCountHeader(count)
 	ctx.JSON(http.StatusOK, &results)
 }
 
@@ -158,6 +160,8 @@ func ListOrgRepos(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/RepositoryList"
+	//   default:
+	//     "$ref": "#/responses/error"
 
-	listUserRepos(ctx, ctx.Org.Organization, ctx.IsSigned)
+	listUserRepos(ctx, ctx.Org.Organization.AsUser(), ctx.IsSigned)
 }

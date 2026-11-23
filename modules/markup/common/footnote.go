@@ -1,7 +1,6 @@
 // Copyright 2019 Yusuke Inuzuka
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 // Most of what follows is a subtly changed version of github.com/yuin/goldmark/extension/footnote.go
 
@@ -10,7 +9,6 @@ package common
 import (
 	"bytes"
 	"fmt"
-	"os"
 	"strconv"
 	"unicode"
 
@@ -23,28 +21,24 @@ import (
 	"github.com/yuin/goldmark/util"
 )
 
+func canKeepRune(r rune) bool {
+	return r == '-' || unicode.In(r, unicode.L, unicode.M, unicode.Nd, unicode.Nl, unicode.Pc, unicode.Other_Alphabetic)
+}
+
 // CleanValue will clean a value to make it safe to be an id
 // This function is quite different from the original goldmark function
 // and more closely matches the output from the shurcooL sanitizer
 // In particular Unicode letters and numbers are a lot more than a-zA-Z0-9...
 func CleanValue(value []byte) []byte {
-	value = bytes.TrimSpace(value)
-	rs := bytes.Runes(value)
-	result := make([]rune, 0, len(rs))
-	needsDash := false
-	for _, r := range rs {
+	return bytes.Map(func(r rune) rune {
 		switch {
-		case unicode.IsLetter(r) || unicode.IsNumber(r):
-			if needsDash && len(result) > 0 {
-				result = append(result, '-')
-			}
-			needsDash = false
-			result = append(result, unicode.ToLower(r))
-		default:
-			needsDash = true
+		case r == ' ':
+			return '-'
+		case canKeepRune(r):
+			return unicode.ToLower(r)
 		}
-	}
-	return []byte(string(result))
+		return -1
+	}, bytes.TrimSpace(value))
 }
 
 // Most of what follows is a subtly changed version of github.com/yuin/goldmark/extension/footnote.go
@@ -60,7 +54,7 @@ type FootnoteLink struct {
 // Dump implements Node.Dump.
 func (n *FootnoteLink) Dump(source []byte, level int) {
 	m := map[string]string{}
-	m["Index"] = fmt.Sprintf("%v", n.Index)
+	m["Index"] = strconv.Itoa(n.Index)
 	m["Name"] = fmt.Sprintf("%v", n.Name)
 	ast.DumpHelper(n, source, level, m, nil)
 }
@@ -92,7 +86,7 @@ type FootnoteBackLink struct {
 // Dump implements Node.Dump.
 func (n *FootnoteBackLink) Dump(source []byte, level int) {
 	m := map[string]string{}
-	m["Index"] = fmt.Sprintf("%v", n.Index)
+	m["Index"] = strconv.Itoa(n.Index)
 	m["Name"] = fmt.Sprintf("%v", n.Name)
 	ast.DumpHelper(n, source, level, m, nil)
 }
@@ -125,9 +119,9 @@ type Footnote struct {
 // Dump implements Node.Dump.
 func (n *Footnote) Dump(source []byte, level int) {
 	m := map[string]string{}
-	m["Index"] = fmt.Sprintf("%v", n.Index)
-	m["Ref"] = fmt.Sprintf("%s", n.Ref)
-	m["Name"] = fmt.Sprintf("%v", n.Name)
+	m["Index"] = strconv.Itoa(n.Index)
+	m["Ref"] = string(n.Ref)
+	m["Name"] = string(n.Name)
 	ast.DumpHelper(n, source, level, m, nil)
 }
 
@@ -158,7 +152,7 @@ type FootnoteList struct {
 // Dump implements Node.Dump.
 func (n *FootnoteList) Dump(source []byte, level int) {
 	m := map[string]string{}
-	m["Count"] = fmt.Sprintf("%v", n.Count)
+	m["Count"] = strconv.Itoa(n.Count)
 	ast.DumpHelper(n, source, level, m, nil)
 }
 
@@ -179,8 +173,7 @@ func NewFootnoteList() *FootnoteList {
 
 var footnoteListKey = parser.NewContextKey()
 
-type footnoteBlockParser struct {
-}
+type footnoteBlockParser struct{}
 
 var defaultFootnoteBlockParser = &footnoteBlockParser{}
 
@@ -205,9 +198,8 @@ func (b *footnoteBlockParser) Open(parent ast.Node, reader text.Reader, pc parse
 		return nil, parser.NoChildren
 	}
 	open := pos + 1
-	closes := 0
-	closure := util.FindClosure(line[pos+1:], '[', ']', false, false)
-	closes = pos + 1 + closure
+	closure := util.FindClosure(line[pos+1:], '[', ']', false, false) //nolint:staticcheck // deprecated function
+	closes := pos + 1 + closure
 	next := closes + 1
 	if closure > -1 {
 		if next >= len(line) || line[next] != ':' {
@@ -246,10 +238,8 @@ func (b *footnoteBlockParser) Continue(node ast.Node, reader text.Reader, pc par
 }
 
 func (b *footnoteBlockParser) Close(node ast.Node, reader text.Reader, pc parser.Context) {
-	var list *FootnoteList
-	if tlist := pc.Get(footnoteListKey); tlist != nil {
-		list = tlist.(*FootnoteList)
-	} else {
+	list, _ := pc.Get(footnoteListKey).(*FootnoteList)
+	if list == nil {
 		list = NewFootnoteList()
 		pc.Set(footnoteListKey, list)
 		node.Parent().InsertBefore(node.Parent(), node, list)
@@ -266,8 +256,7 @@ func (b *footnoteBlockParser) CanAcceptIndentedLine() bool {
 	return false
 }
 
-type footnoteParser struct {
-}
+type footnoteParser struct{}
 
 var defaultFootnoteParser = &footnoteParser{}
 
@@ -297,7 +286,7 @@ func (s *footnoteParser) Parse(parent ast.Node, block text.Reader, pc parser.Con
 		return nil
 	}
 	open := pos
-	closure := util.FindClosure(line[pos:], '[', ']', false, false)
+	closure := util.FindClosure(line[pos:], '[', ']', false, false) //nolint:staticcheck // deprecated function
 	if closure < 0 {
 		return nil
 	}
@@ -305,17 +294,14 @@ func (s *footnoteParser) Parse(parent ast.Node, block text.Reader, pc parser.Con
 	value := block.Value(text.NewSegment(segment.Start+open, segment.Start+closes))
 	block.Advance(closes + 1)
 
-	var list *FootnoteList
-	if tlist := pc.Get(footnoteListKey); tlist != nil {
-		list = tlist.(*FootnoteList)
-	}
+	list, _ := pc.Get(footnoteListKey).(*FootnoteList)
 	if list == nil {
 		return nil
 	}
 	index := 0
 	name := []byte{}
 	for def := list.FirstChild(); def != nil; def = def.NextSibling() {
-		d := def.(*Footnote)
+		d := def.(*Footnote) //nolint:forcetypeassert // a FootnoteList only holds *Footnote children
 		if bytes.Equal(d.Ref, value) {
 			if d.Index < 0 {
 				list.Count++
@@ -338,8 +324,7 @@ func (s *footnoteParser) Parse(parent ast.Node, block text.Reader, pc parser.Con
 	return NewFootnoteLink(index, name)
 }
 
-type footnoteASTTransformer struct {
-}
+type footnoteASTTransformer struct{}
 
 var defaultFootnoteASTTransformer = &footnoteASTTransformer{}
 
@@ -350,31 +335,27 @@ func NewFootnoteASTTransformer() parser.ASTTransformer {
 }
 
 func (a *footnoteASTTransformer) Transform(node *ast.Document, reader text.Reader, pc parser.Context) {
-	var list *FootnoteList
-	if tlist := pc.Get(footnoteListKey); tlist != nil {
-		list = tlist.(*FootnoteList)
-	} else {
+	list, _ := pc.Get(footnoteListKey).(*FootnoteList)
+	if list == nil {
 		return
 	}
 	pc.Set(footnoteListKey, nil)
 	for footnote := list.FirstChild(); footnote != nil; {
-		var container ast.Node = footnote
+		container := footnote
 		next := footnote.NextSibling()
 		if fc := container.LastChild(); fc != nil && ast.IsParagraph(fc) {
 			container = fc
 		}
-		footnoteNode := footnote.(*Footnote)
-		index := footnoteNode.Index
-		name := footnoteNode.Name
-		if index < 0 {
+		footnoteNode := footnote.(*Footnote) //nolint:forcetypeassert // a FootnoteList only holds *Footnote children
+		if footnoteNode.Index < 0 {
 			list.RemoveChild(list, footnote)
 		} else {
-			container.AppendChild(container, NewFootnoteBackLink(index, name))
+			container.AppendChild(container, NewFootnoteBackLink(footnoteNode.Index, footnoteNode.Name))
 		}
 		footnote = next
 	}
 	list.SortChildren(func(n1, n2 ast.Node) int {
-		if n1.(*Footnote).Index < n2.(*Footnote).Index {
+		if n1.(*Footnote).Index < n2.(*Footnote).Index { //nolint:forcetypeassert // a FootnoteList only holds *Footnote children
 			return -1
 		}
 		return 1
@@ -414,25 +395,25 @@ func (r *FootnoteHTMLRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegist
 
 func (r *FootnoteHTMLRenderer) renderFootnoteLink(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
-		n := node.(*FootnoteLink)
-		n.Dump(source, 0)
+		n := node.(*FootnoteLink) //nolint:forcetypeassert // registered for KindFootnoteLink only
 		is := strconv.Itoa(n.Index)
-		_, _ = w.WriteString(`<sup id="fnref:`)
+		_, _ = w.WriteString(`<sup id="fnref:user-content-`)
 		_, _ = w.Write(n.Name)
-		_, _ = w.WriteString(`"><a href="#fn:`)
+		_, _ = w.WriteString(`"><a href="#fn:user-content-`)
 		_, _ = w.Write(n.Name)
-		_, _ = w.WriteString(`" class="footnote-ref" role="doc-noteref">`)
+		_, _ = w.WriteString(`" class="footnote-ref" role="doc-noteref">`) // FIXME: here and below, need to keep the classes
+		// literal brackets separate adjacent refs, also where no CSS applies like in mails
+		_, _ = w.WriteString("[")
 		_, _ = w.WriteString(is)
-		_, _ = w.WriteString(`</a></sup>`)
+		_, _ = w.WriteString("]</a></sup>")
 	}
 	return ast.WalkContinue, nil
 }
 
 func (r *FootnoteHTMLRenderer) renderFootnoteBackLink(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
-		n := node.(*FootnoteBackLink)
-		fmt.Fprintf(os.Stdout, "source:\n%s\n", string(n.Text(source)))
-		_, _ = w.WriteString(` <a href="#fnref:`)
+		n := node.(*FootnoteBackLink) //nolint:forcetypeassert // registered for KindFootnoteBackLink only
+		_, _ = w.WriteString(` <a href="#fnref:user-content-`)
 		_, _ = w.Write(n.Name)
 		_, _ = w.WriteString(`" class="footnote-backref" role="doc-backlink">`)
 		_, _ = w.WriteString("&#x21a9;&#xfe0e;")
@@ -442,10 +423,9 @@ func (r *FootnoteHTMLRenderer) renderFootnoteBackLink(w util.BufWriter, source [
 }
 
 func (r *FootnoteHTMLRenderer) renderFootnote(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
-	n := node.(*Footnote)
+	n := node.(*Footnote) //nolint:forcetypeassert // registered for KindFootnote only
 	if entering {
-		fmt.Fprintf(os.Stdout, "source:\n%s\n", string(n.Text(source)))
-		_, _ = w.WriteString(`<li id="fn:`)
+		_, _ = w.WriteString(`<li id="fn:user-content-`)
 		_, _ = w.Write(n.Name)
 		_, _ = w.WriteString(`" role="doc-endnote"`)
 		if node.Attributes() != nil {

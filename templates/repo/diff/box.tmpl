@@ -1,310 +1,267 @@
-{{if .DiffNotAvailable}}
-	<div class="diff-detail-box diff-box sticky">
-		<div>
-			<div class="ui right">
-				{{if .PageIsPullFiles}}
-					{{template "repo/diff/whitespace_dropdown" .}}
-				{{else}}
-					<a class="ui tiny basic toggle button" href="?style={{if .IsSplitStyle}}unified{{else}}split{{end}}">{{ if .IsSplitStyle }}{{.i18n.Tr "repo.diff.show_unified_view"}}{{else}}{{.i18n.Tr "repo.diff.show_split_view"}}{{end}}</a>
-				{{end}}
-				{{template "repo/diff/options_dropdown" .}}
-				{{if and .PageIsPullFiles $.SignedUserID (not .IsArchived)}}
-					{{template "repo/diff/new_review" .}}
-				{{end}}
-			</div>
+{{$showFileTree := (and (not .DiffNotAvailable) (gt .DiffShortStat.NumFiles 1))}}
+<div>
+	<div class="diff-detail-box">
+		<div class="flex-text-block tw-flex-wrap tw-ml-0.5">
+			{{if $showFileTree}}
+				<button type="button" class="diff-toggle-file-tree-button not-mobile btn interact-fg" data-show-text="{{ctx.Locale.Tr "repo.diff.show_file_tree"}}" data-hide-text="{{ctx.Locale.Tr "repo.diff.hide_file_tree"}}">
+					{{/* the icon meaning is reversed here, "octicon-sidebar-collapse" means show the file tree */}}
+					{{svg "octicon-sidebar-collapse" 20 "icon tw-hidden"}}
+					{{svg "octicon-sidebar-expand" 20 "icon tw-hidden"}}
+				</button>
+				<script nonce="{{ctx.CspScriptNonce}}">
+					// Default to true if unset
+					const diffTreeVisible = window.localUserSettings.getBoolean('diff_file_tree_visible', true);
+					const diffTreeBtn = document.querySelector('.diff-toggle-file-tree-button');
+					const diffTreeIcon = `.octicon-sidebar-${diffTreeVisible ? 'expand' : 'collapse'}`;
+					diffTreeBtn.querySelector(diffTreeIcon).classList.remove('tw-hidden');
+					diffTreeBtn.setAttribute('data-tooltip-content', diffTreeBtn.getAttribute(diffTreeVisible ? 'data-hide-text' : 'data-show-text'));
+				</script>
+			{{end}}
+			{{if .ShowDiffSummaryInToolbar}}
+				<div class="diff-detail-stats tw-flex tw-items-center tw-flex-wrap">
+					{{svg "octicon-diff" 16 "tw-mr-1"}}{{ctx.Locale.Tr "repo.diff.stats_desc" .DiffShortStat.NumFiles .DiffShortStat.TotalAddition .DiffShortStat.TotalDeletion}}
+				</div>
+			{{end}}
+		</div>
+		<div class="diff-detail-actions">
+			{{if and .PageIsPullFiles $.SignedUserID (not .DiffNotAvailable)}}
+				<div class="not-mobile tw-flex tw-items-center tw-flex-col tw-whitespace-nowrap tw-mr-1">
+					<label for="viewed-files-summary" id="viewed-files-summary-label" data-text-changed-template="{{ctx.Locale.Tr "repo.pulls.viewed_files_label"}}">
+						{{ctx.Locale.Tr "repo.pulls.viewed_files_label" .NumViewedFiles .DiffShortStat.NumFiles}}
+					</label>
+					<progress id="viewed-files-summary" value="{{.NumViewedFiles}}" max="{{.DiffShortStat.NumFiles}}"></progress>
+				</div>
+			{{end}}
+			{{template "repo/diff/whitespace_dropdown" .}}
+			{{template "repo/diff/options_dropdown" .}}
+			{{if .PageIsPullFiles}}
+				<div id="diff-commit-select" data-global-init="initDiffCommitSelect" data-merge-base="{{$.CompareInfo.CompareBase}}" data-issuelink="{{$.Issue.Link}}"
+					{{if not $.IsShowingAllCommits}}data-before-commit="{{$.BeforeCommitID}}" data-after-commit="{{$.AfterCommitID}}"{{end}}
+					data-queryparams="?style={{if $.IsSplitStyle}}split{{else}}unified{{end}}&whitespace={{$.WhitespaceBehavior}}&show-outdated={{$.ShowOutdatedComments}}"
+					data-text-filter-changes-by-commit="{{ctx.Locale.Tr "repo.pulls.filter_changes_by_commit"}}">
+					{{/* the following will be replaced by vue component, but this avoids any loading artifacts till the vue component is initialized */}}
+					<div class="ui jump dropdown tiny basic button custom">
+						{{svg "octicon-git-commit"}}
+					</div>
+				</div>
+			{{end}}
+			{{if and .PageIsPullFiles $.SignedUserID}}
+				{{template "repo/diff/new_review" .}}
+			{{end}}
 		</div>
 	</div>
-	<h4>{{.i18n.Tr "repo.diff.data_not_available"}}</h4>
-{{else}}
-	<div>
-		<div class="diff-detail-box diff-box sticky">
-			{{svg "octicon-diff" 16}} {{.i18n.Tr "repo.diff.stats_desc" .Diff.NumFiles .Diff.TotalAddition .Diff.TotalDeletion | Str2html}}
-			<div class="ui right">
-				{{if .PageIsPullFiles}}
-					{{template "repo/diff/whitespace_dropdown" .}}
-				{{else}}
-					<a class="ui tiny basic toggle button" href="?style={{if .IsSplitStyle}}unified{{else}}split{{end}}">{{ if .IsSplitStyle }}{{.i18n.Tr "repo.diff.show_unified_view"}}{{else}}{{.i18n.Tr "repo.diff.show_split_view"}}{{end}}</a>
-				{{end}}
-				{{template "repo/diff/options_dropdown" .}}
-				{{if and .PageIsPullFiles $.SignedUserID (not .IsArchived)}}
-					{{template "repo/diff/new_review" .}}
-				{{end}}
-			</div>
-		</div>
-		<ol class="diff-detail-box diff-stats detail-files hide" id="diff-files">
-			{{range .Diff.Files}}
-				<li>
-					<div class="diff-counter count pull-right">
-						{{if not .IsBin}}
-							<span class="add" data-line="{{.Addition}}">+{{.Addition}}</span>
-							<span class="bar">
-								<div class="pull-left add"></div>
-								<div class="pull-left del"></div>
-							</span>
-							<span class="del" data-line="{{.Deletion}}">-{{.Deletion}}</span>
-						{{else}}
-							<span>{{$.i18n.Tr "repo.diff.bin"}}</span>
-						{{end}}
-					</div>
-					<!-- todo finish all file status, now modify, add, delete and rename -->
-					<span class="status {{DiffTypeToStr .GetType}} poping up" data-content="{{DiffTypeToStr .GetType}}" data-variation="inverted tiny" data-position="right center">&nbsp;</span>
-					<a class="file" href="#diff-{{.Index}}">{{.Name}}</a>
-				</li>
-			{{end}}
-		</ol>
-		{{range $i, $file := .Diff.Files}}
-			{{if $file.IsIncomplete}}
-				<div class="diff-file-box diff-box file-content">
-					<h4 class="ui top attached normal header rounded">
-						<div class="diff-counter count ui left">
-							{{if not $file.IsRenamed}}
-								<span class="add" data-line="{{.Addition}}">+ {{.Addition}}</span>
-								<span class="bar">
-									<div class="pull-left add"></div>
-									<div class="pull-left del"></div>
-								</span>
-								<span class="del" data-line="{{.Deletion}}">- {{.Deletion}}</span>
-							{{end}}
-						</div>
-						<span class="file">{{$file.Name}}</span>
-						<div>{{$.i18n.Tr "repo.diff.file_suppressed"}}</div>
-						{{if and (not $file.IsSubmodule) (not $.PageIsWiki)}}
-							{{if $file.IsDeleted}}
-								<a class="ui basic grey tiny button" rel="nofollow" href="{{EscapePound $.BeforeSourcePath}}/{{EscapePound .Name}}">{{$.i18n.Tr "repo.diff.view_file"}}</a>
-							{{else}}
-								<a class="ui basic grey tiny button" rel="nofollow" href="{{EscapePound $.SourcePath}}/{{EscapePound .Name}}">{{$.i18n.Tr "repo.diff.view_file"}}</a>
-							{{end}}
-						{{end}}
-					</h4>
-				</div>
-			{{else}}
-				<div class="diff-file-box diff-box file-content {{TabSizeClass $.Editorconfig $file.Name}}" id="diff-{{.Index}}">
-					<h4 class="diff-file-header ui top attached normal header">
-						{{$isImage := false}}
-						{{if $file.IsDeleted}}
-							{{$isImage = (call $.IsImageFileInBase $file.Name)}}
-						{{else}}
-							{{$isImage = (call $.IsImageFileInHead $file.Name)}}
-						{{end}}
-						{{if or (not $file.IsBin) $isImage}}
-						<a role="button" class="fold-file">
-							{{svg "octicon-chevron-down" 18}}
-						</a>
-						{{end}}
-						<div class="diff-counter count">
-							{{if $file.IsBin}}
-								{{$.i18n.Tr "repo.diff.bin"}}
-							{{else if not $file.IsRenamed}}
-								<span class="add" data-line="{{.Addition}}">+ {{.Addition}}</span>
-								<span class="bar">
-									<div class="pull-left add"></div>
-									<div class="pull-left del"></div>
-								</span>
-								<span class="del" data-line="{{.Deletion}}">- {{.Deletion}}</span>
-							{{end}}
-						</div>
-						<span class="file">{{if $file.IsRenamed}}{{$file.OldName}} &rarr; {{end}}{{$file.Name}}{{if .IsLFSFile}} ({{$.i18n.Tr "repo.stored_lfs"}}){{end}}</span>
-						{{if and (not $file.IsSubmodule) (not $.PageIsWiki)}}
-							{{if $file.IsDeleted}}
-								<a class="ui basic grey tiny button" rel="nofollow" href="{{EscapePound $.BeforeSourcePath}}/{{EscapePound .Name}}">{{$.i18n.Tr "repo.diff.view_file"}}</a>
-							{{else}}
-								<a class="ui basic grey tiny button" rel="nofollow" href="{{EscapePound $.SourcePath}}/{{EscapePound .Name}}">{{$.i18n.Tr "repo.diff.view_file"}}</a>
-							{{end}}
-						{{end}}
-					</h4>
-					<div class="diff-file-body ui attached unstackable table segment">
-						{{if ne $file.Type 4}}
-							<div class="file-body file-code code-view has-context-menu code-diff {{if $.IsSplitStyle}}code-diff-split{{else}}code-diff-unified{{end}}">
-								<table class="chroma">
-									<tbody>
-										{{if $isImage}}
-											{{template "repo/diff/image_diff" dict "file" . "root" $}}
-										{{else}}
-											{{if $.IsSplitStyle}}
-												{{range $j, $section := $file.Sections}}
-													{{range $k, $line := $section.Lines}}
-														<tr class="{{DiffLineTypeToStr .GetType}}-code nl-{{$k}} ol-{{$k}}">
-															{{if eq .GetType 4}}
-																<td class="lines-num lines-num-old">
-																	{{if or (eq $line.GetExpandDirection 3) (eq $line.GetExpandDirection 5) }}
-																		<a role="button" class="blob-excerpt" data-url="{{$.RepoLink}}/blob_excerpt/{{$.AfterCommitID}}" data-query="{{$line.GetBlobExcerptQuery}}&style=split&direction=down" data-anchor="diff-{{Sha1 $file.Name}}K{{$line.SectionInfo.RightIdx}}">
-																			{{svg "octicon-fold-down" 16}}
-																		</a>
-																	{{end}}
-																	{{if or (eq $line.GetExpandDirection 3) (eq $line.GetExpandDirection 4) }}
-																		<a role="button" class="blob-excerpt" data-url="{{$.RepoLink}}/blob_excerpt/{{$.AfterCommitID}}" data-query="{{$line.GetBlobExcerptQuery}}&style=split&direction=up" data-anchor="diff-{{Sha1 $file.Name}}K{{$line.SectionInfo.RightIdx}}">
-																			{{svg "octicon-fold-up" 16}}
-																		</a>
-																	{{end}}
-																	{{if eq $line.GetExpandDirection 2}}
-																		<a role="button" class="blob-excerpt" data-url="{{$.RepoLink}}/blob_excerpt/{{$.AfterCommitID}}" data-query="{{$line.GetBlobExcerptQuery}}&style=split&direction=" data-anchor="diff-{{Sha1 $file.Name}}K{{$line.SectionInfo.RightIdx}}">
-																			{{svg "octicon-fold" 16}}
-																		</a>
-																	{{end}}
-																</td>
-																<td colspan="5" class="lines-code lines-code-old "><span class="mono wrap">{{$section.GetComputedInlineDiffFor $line}}</span></td>
-															{{else}}
-																<td class="lines-num lines-num-old" data-line-num="{{if $line.LeftIdx}}{{$line.LeftIdx}}{{end}}"><span rel="{{if $line.LeftIdx}}diff-{{Sha1 $file.Name}}L{{$line.LeftIdx}}{{end}}"></span></td>
-																<td class="lines-type-marker lines-type-marker-old">{{if $line.LeftIdx}}<span class="mono" data-type-marker="{{$line.GetLineTypeMarker}}"></span>{{end}}</td>
-																<td class="lines-code lines-code-old halfwidth">{{if and $.SignedUserID $line.CanComment $.PageIsPullFiles (not (eq .GetType 2))}}<a class="ui green button add-code-comment add-code-comment-left" data-path="{{$file.Name}}" data-side="left" data-idx="{{$line.LeftIdx}}" data-type-marker="+"></a>{{end}}<span class="mono wrap">{{if $line.LeftIdx}}{{$section.GetComputedInlineDiffFor $line}}{{end}}</span></td>
-																<td class="lines-num lines-num-new" data-line-num="{{if $line.RightIdx}}{{$line.RightIdx}}{{end}}"><span rel="{{if $line.RightIdx}}diff-{{Sha1 $file.Name}}R{{$line.RightIdx}}{{end}}"></span></td>
-																<td class="lines-type-marker lines-type-marker-new">{{if $line.RightIdx}}<span class="mono" data-type-marker="{{$line.GetLineTypeMarker}}"></span>{{end}}</td>
-																<td class="lines-code lines-code-new halfwidth">{{if and $.SignedUserID $line.CanComment $.PageIsPullFiles (not (eq .GetType 3))}}<a class="ui green button add-code-comment add-code-comment-right" data-path="{{$file.Name}}" data-side="right" data-idx="{{$line.RightIdx}}" data-type-marker="+"></a>{{end}}<span class="mono wrap">{{if $line.RightIdx}}{{$section.GetComputedInlineDiffFor $line}}{{end}}</span></td>
-															{{end}}
-														</tr>
-														{{if gt (len $line.Comments) 0}}
-															{{$resolved := (index $line.Comments 0).IsResolved}}
-															{{$resolveDoer := (index $line.Comments 0).ResolveDoer}}
-															{{$isNotPending := (not (eq (index $line.Comments 0).Review.Type 0))}}
-															<tr class="add-code-comment">
-																<td class="lines-num"></td>
-																<td class="lines-type-marker"></td>
-																<td class="add-comment-left">
-																	{{if and $resolved  (eq $line.GetCommentSide "previous")}}
-																		<div class="ui top attached header">
-																			<span class="ui grey text left"><b>{{$resolveDoer.Name}}</b> {{$.i18n.Tr "repo.issues.review.resolved_by"}}</span>
-																			<button id="show-outdated-{{(index $line.Comments 0).ID}}" data-comment="{{(index $line.Comments 0).ID}}" class="ui compact right labeled button show-outdated">
-																				{{svg "octicon-unfold" 16}}
-																				{{$.i18n.Tr "repo.issues.review.show_resolved"}}
-																			</button>
-																			<button id="hide-outdated-{{(index $line.Comments 0).ID}}" data-comment="{{(index $line.Comments 0).ID}}" class="hide ui compact right labeled button hide-outdated">
-																				{{svg "octicon-fold" 16}}
-																				{{$.i18n.Tr "repo.issues.review.hide_resolved"}}
-																			</button>
-																		</div>
-																	{{end}}
-																	{{if eq $line.GetCommentSide "previous"}}
-																		<div id="code-comments-{{(index  $line.Comments 0).ID}}" class="field comment-code-cloud {{if $resolved}}hide{{end}}">
-																			<div class="comment-list">
-																				<ui class="ui comments">
-																				{{ template "repo/diff/comments" dict "root" $ "comments" $line.Comments}}
-																				</ui>
-																			</div>
-																		{{template "repo/diff/comment_form_datahandler" dict "reply" (index $line.Comments 0).ReviewID "hidden" true "root" $ "comment" (index $line.Comments 0)}}
-																			{{if and $.CanMarkConversation $isNotPending}}
-																				<button class="ui icon tiny button resolve-conversation" data-action="{{if not $resolved}}Resolve{{else}}UnResolve{{end}}" data-comment-id="{{(index $line.Comments 0).ID}}" data-update-url="{{$.RepoLink}}/issues/resolve_conversation" >
-																					{{if $resolved}}
-																						{{$.i18n.Tr "repo.issues.review.un_resolve_conversation"}}
-																					{{else}}
-																						{{$.i18n.Tr "repo.issues.review.resolve_conversation"}}
-																					{{end}}
-																				</button>
-																			{{end}}
-																		</div>
-																	{{end}}
-																</td>
-																<td class="lines-num"></td>
-																<td class="lines-type-marker"></td>
-																<td class="add-comment-right">
-																	{{if and $resolved (eq $line.GetCommentSide "proposed")}}
-																		<div class="ui top attached header">
-																			<span class="ui grey text left"><b>{{$resolveDoer.Name}}</b> {{$.i18n.Tr "repo.issues.review.resolved_by"}}</span>
-																			<button id="show-outdated-{{(index $line.Comments 0).ID}}" data-comment="{{(index $line.Comments 0).ID}}" class="ui compact right labeled button show-outdated">
-																				{{svg "octicon-unfold" 16}}
-																				{{$.i18n.Tr "repo.issues.review.show_resolved"}}
-																			</button>
-																			<button id="hide-outdated-{{(index $line.Comments 0).ID}}" data-comment="{{(index $line.Comments 0).ID}}" class="hide ui compact right labeled button hide-outdated">
-																				{{svg "octicon-fold" 16}}
-																				{{$.i18n.Tr "repo.issues.review.hide_resolved"}}
-																			</button>
-																		</div>
-																	{{end}}
-																	{{if eq $line.GetCommentSide "proposed"}}
-																		<div id="code-comments-{{(index  $line.Comments 0).ID}}" class="field comment-code-cloud {{if $resolved}}hide{{end}}">
-																			<div class="comment-list">
-																				<ui class="ui comments">
-																				{{ template "repo/diff/comments" dict "root" $ "comments" $line.Comments}}
-																				</ui>
-																			</div>
-																			{{template "repo/diff/comment_form_datahandler" dict "reply" (index $line.Comments 0).ReviewID "hidden" true "root" $ "comment" (index $line.Comments 0)}}
-																			{{if and $.CanMarkConversation $isNotPending}}
-																				<button class="ui icon tiny button resolve-conversation" data-action="{{if not $resolved}}Resolve{{else}}UnResolve{{end}}" data-comment-id="{{(index $line.Comments 0).ID}}" data-update-url="{{$.RepoLink}}/issues/resolve_conversation" >
-																					{{if $resolved}}
-																						{{$.i18n.Tr "repo.issues.review.un_resolve_conversation"}}
-																					{{else}}
-																						{{$.i18n.Tr "repo.issues.review.resolve_conversation"}}
-																					{{end}}
-																				</button>
-																			{{end}}
-																		</div>
-																	{{end}}
-																</td>
-															</tr>
-														{{end}}
-													{{end}}
-												{{end}}
-											{{else}}
-												{{template "repo/diff/section_unified" dict "file" . "root" $}}
-											{{end}}
-										{{end}}
-									</tbody>
-								</table>
-							</div>
-						{{end}}
-					</div>
-				</div>
-			{{end}}
-		<br>
-		{{end}}
-
-		{{if .Diff.IsIncomplete}}
-			<div class="diff-file-box diff-box file-content">
-				<h4 class="ui top attached normal header">
-					{{$.i18n.Tr "repo.diff.too_many_files"}}
-				</h4>
+	{{if not .DiffNotAvailable}}
+		{{if and .PageIsPullFiles .SingleCommit}}
+			{{template "repo/diff/single_commit_bar" .}}
+		{{else if and (not .IsShowingAllCommits) .PageIsPullFiles}}
+			<div class="ui info message">
+				<div>{{ctx.Locale.Tr "repo.pulls.showing_specified_commit_range" (ShortSha .BeforeCommitID) (ShortSha .AfterCommitID)}} - <a href="{{$.Issue.Link}}/files?style={{if $.IsSplitStyle}}split{{else}}unified{{end}}&whitespace={{$.WhitespaceBehavior}}&show-outdated={{$.ShowOutdatedComments}}">{{ctx.Locale.Tr "repo.pulls.show_all_commits"}}</a></div>
 			</div>
 		{{end}}
-
-		{{if not $.Repository.IsArchived}}
-			<div id="pull_review_add_comment" class="hide">
-					{{template "repo/diff/new_comment" dict "root" .}}
-					</div>
-					<div class="hide" id="edit-content-form">
-							<div class="ui comment form">
-									<div class="ui top attached tabular menu">
-											<a class="active write item">{{$.i18n.Tr "write"}}</a>
-											<a class="preview item" data-url="{{$.Repository.APIURL}}/markdown" data-context="{{$.RepoLink}}">{{$.i18n.Tr "preview"}}</a>
-									</div>
-									<div class="ui bottom attached active write tab segment">
-											<textarea class="review-textarea" tabindex="1" name="content"></textarea>
-									</div>
-									<div class="ui bottom attached tab preview segment markdown">
-									{{$.i18n.Tr "loading"}}
-									</div>
-									<div class="text right edit buttons">
-											<div class="ui basic blue cancel button" tabindex="3">{{.i18n.Tr "repo.issues.cancel"}}</div>
-											<div class="ui green save button" tabindex="2">{{.i18n.Tr "repo.issues.save"}}</div>
-									</div>
-							</div>
-					</div>
-		 {{end}}
-
-		{{if .IsSplitStyle}}
-			<script>
-				document.addEventListener('DOMContentLoaded', function() {
-					$('tr.add-code').each(function() {
-						var prev = $(this).prev();
-						if(prev.is('.del-code') && prev.children().eq(5).text().trim() === '') {
-							while(prev.prev().is('.del-code') && prev.prev().children().eq(5).text().trim() === '') {
-								prev = prev.prev();
-							}
-							prev.children().eq(3).attr("data-line-num", $(this).children().eq(3).attr("data-line-num"));
-							prev.children().eq(3).html($(this).children().eq(3).html());
-							prev.children().eq(4).html($(this).children().eq(4).html());
-							prev.children().eq(5).html($(this).children().eq(5).html());
-
-							prev.children().eq(0).addClass('del-code');
-							prev.children().eq(1).addClass('del-code');
-							prev.children().eq(2).addClass('del-code');
-							prev.children().eq(3).addClass('add-code');
-							prev.children().eq(4).addClass('add-code');
-							prev.children().eq(5).addClass('add-code');
-
-							$(this).remove();
-						}
-					});
-				});
+	{{end}}
+	<div id="diff-container">
+		{{if $showFileTree}}
+			{{$.FileIconPoolHTML}}
+			<div id="diff-file-tree" data-global-init="initDiffFileTree" class="tw-hidden not-mobile" data-locale="{{JsonUtils.EncodeToString (dict
+				"filterFiles" (ctx.Locale.Tr "repo.diff.filter_files")
+				"filterFilesClear" (ctx.Locale.Tr "repo.diff.filter_files_clear")
+				"filterByFileExtension" (ctx.Locale.Tr "repo.diff.filter_by_file_extension")
+				"fileExtensions" (ctx.Locale.Tr "repo.diff.file_extensions")
+				"noFileExtension" (ctx.Locale.Tr "repo.diff.no_file_extension")
+				"dotfileExtension" (ctx.Locale.Tr "repo.diff.dotfile_extension")
+				"allFileExtensions" (ctx.Locale.Tr "repo.diff.all_file_extensions")
+			)}}"></div>
+			<script nonce="{{ctx.CspScriptNonce}}">
+				if (diffTreeVisible) document.getElementById('diff-file-tree').classList.remove('tw-hidden');
 			</script>
 		{{end}}
+		{{if .DiffNotAvailable}}
+			<h4>{{ctx.Locale.Tr "repo.diff.data_not_available"}}</h4>
+		{{else}}
+			<div id="diff-boxes-column">
+				{{if $showFileTree}}
+					<div id="diff-no-matches" class="empty-placeholder tw-hidden">
+						<h2>{{ctx.Locale.Tr "repo.diff.no_files_matched"}}</h2>
+					</div>
+				{{end}}
+				<div id="diff-file-boxes">
+				{{range $file := .Diff.Files}}
+					{{/*notice: the index of Diff.Files should not be used for element ID, because the index will be restarted from 0 when doing load-more for PRs with a lot of files*/}}
+					{{$isImage:= $file.IsBlobTypeImage}}
+					{{$isCsv := $file.IsBlobTypeCsv}}
+					{{$showFileViewToggle := $file.CanShowFileViewToggle}}
+					{{$isReviewFile := and $.IsSigned $.PageIsPullFiles (not $.Repository.IsArchived) $.IsShowingAllCommits}}
+					<div class="diff-file-box file-content {{TabSizeClass $.Editorconfig $file.Name}} tw-mt-0" id="diff-{{$file.NameHash}}" data-old-filename="{{$file.OldName}}" data-new-filename="{{$file.Name}}" {{if $file.ShouldBeHidden}}data-folded="true"{{end}}>
+						<div class="diff-file-header sticky-2nd-row ui top attached header">
+							<div class="diff-file-name tw-flex tw-flex-1 tw-items-center tw-gap-1 tw-flex-wrap">
+								<div class="flex-text-block">
+									<button type="button" class="fold-file btn interact-bg tw-flex-shrink-0 tw-p-1" data-global-click="diffFileViewFold">
+										{{if $file.ShouldBeHidden}}
+											{{svg "octicon-chevron-right" 18}}
+										{{else}}
+											{{svg "octicon-chevron-down" 18}}
+										{{end}}
+									</button>
+									{{$entryModeText := $file.TranslateDiffEntryMode ctx.Locale}}
+									<a class="muted file-link tw-font-mono" title="{{if $file.IsRenamed}}{{$file.OldName}} → {{end}}{{$file.Name}}" href="#diff-{{$file.NameHash}}">
+										{{if $file.IsRenamed}}{{$file.OldName}} → {{end}}{{$file.Name}}
+									</a>
+								</div>
+								<button type="button" class="btn interact-fg tw-p-2 tw-shrink-0" data-clipboard-text="{{$file.Name}}" data-tooltip-content="{{ctx.Locale.Tr "copy_path"}}">{{svg "octicon-copy" 14}}</button>
+								{{if $file.IsLFSFile}}
+									<span class="ui label">LFS</span>
+								{{end}}
+								{{if $file.IsGenerated}}
+									<span class="ui label">{{ctx.Locale.Tr "repo.diff.generated"}}</span>
+								{{end}}
+								{{if $file.IsVendored}}
+									<span class="ui label">{{ctx.Locale.Tr "repo.diff.vendored"}}</span>
+								{{end}}
+								{{if $entryModeText}}
+									<span class="ui label">{{$entryModeText}}</span>
+								{{end}}
+							</div>
+							<div class="diff-file-header-actions flex-text-block tw-justify-end tw-flex-wrap">
+								{{if $file.IsBin}}
+									{{ctx.Locale.Tr "repo.diff.bin"}}
+								{{else}}
+									{{template "repo/diff/stats" dict "Addition" .Addition "Deletion" .Deletion}}
+								{{end}}
+
+								{{if $showFileViewToggle}}
+									<div class="ui compact icon buttons" data-global-init="initDiffFileViewToggle">
+										<button type="button" class="ui tiny basic button file-view-toggle" data-toggle-selector="#diff-source-{{$file.NameHash}}" data-tooltip-content="{{ctx.Locale.Tr "repo.file_view_source"}}">{{svg "octicon-code"}}</button>
+										<button type="button" class="ui tiny basic button file-view-toggle active" data-toggle-selector="#diff-rendered-{{$file.NameHash}}" data-tooltip-content="{{ctx.Locale.Tr "repo.file_view_rendered"}}">{{svg "octicon-file"}}</button>
+									</div>
+								{{end}}
+								{{if $file.IsProtected}}
+									<span class="ui basic label">{{ctx.Locale.Tr "repo.diff.protected"}}</span>
+								{{end}}
+								{{if and $isReviewFile $file.HasChangedSinceLastReview}}
+									<span class="changed-since-last-review unselectable not-mobile">{{ctx.Locale.Tr "repo.pulls.has_changed_since_last_review"}}</span>
+								{{end}}
+								{{if $isReviewFile}}
+									<label data-link="{{$.Issue.Link}}/viewed-files" data-headcommit="{{$.AfterCommitID}}" class="viewed-file-form unselectable {{if $file.IsViewed}}viewed-file-checked-form{{end}}" data-global-init="initDiffFileViewedForm">
+										<input type="checkbox" name="{{$file.GetDiffFileName}}" autocomplete="off" {{if $file.IsViewed}}checked{{end}}> {{ctx.Locale.Tr "repo.pulls.has_viewed_file"}}
+									</label>
+								{{end}}
+								{{if not $file.IsSubmodule}}
+									<button type="button" class="btn tw-p-1" data-global-init="initDiffHeaderPopupMenu">{{svg "octicon-kebab-horizontal" 18}}</button>
+									<div class="tippy-target">
+										{{if not (or $file.IsIncomplete $file.IsBin)}}
+											<button type="button" class="unescape-button item" data-unicode-content-selector="#diff-{{$file.NameHash}}">{{ctx.Locale.Tr "repo.unescape_control_characters"}}</button>
+											<button type="button" class="escape-button tw-hidden item" data-unicode-content-selector="#diff-{{$file.NameHash}}">{{ctx.Locale.Tr "repo.escape_control_characters"}}</button>
+										{{end}}
+										<button type="button" class="item" data-clipboard-text="{{$file.GetDiffFileBaseName}}">{{ctx.Locale.Tr "copy_filename"}}</button>
+										{{if not $.PageIsWiki}}
+											{{if $file.IsDeleted}}
+												<a class="item" rel="nofollow" href="{{$.BeforeSourcePath}}/{{PathEscapeSegments .Name}}">{{ctx.Locale.Tr "repo.diff.view_file"}}</a>
+											{{else}}
+												<a class="item" rel="nofollow" href="{{$.SourcePath}}/{{PathEscapeSegments .Name}}">{{ctx.Locale.Tr "repo.diff.view_file"}}</a>
+												{{if and $.Repository.CanContentChange $.CanEditFile}}
+													<a class="item" rel="nofollow" href="{{$.HeadRepoLink}}/_edit/{{PathEscapeSegments $.HeadBranchName}}/{{PathEscapeSegments $file.Name}}?return_uri={{print $.BackToLink "#diff-" $file.NameHash | QueryEscape}}">{{ctx.Locale.Tr "repo.editor.edit_this_file"}}</a>
+												{{end}}
+											{{end}}
+										{{end}}
+									</div>
+								{{end}}
+							</div>
+						</div>
+						<div class="diff-file-body ui attached unstackable table segment" {{if and $file.IsViewed $.IsShowingAllCommits}}data-folded="true"{{end}}>
+							<div id="diff-source-{{$file.NameHash}}" class="file-body file-code unicode-escaped code-diff{{if $.IsSplitStyle}} code-diff-split{{else}} code-diff-unified{{end}}{{if $showFileViewToggle}} tw-hidden{{end}}">
+								{{if or $file.IsIncomplete $file.IsBin}}
+									<div class="tw-p-3">
+										{{if $file.IsIncomplete}}
+											{{ctx.Locale.Tr "repo.diff.file_suppressed"}}
+											<button type="button" class="ui basic tiny button" data-global-click="diffLoadFileBody" data-href="?file-only=true&files={{$file.Name}}&files={{$file.OldName}}">{{ctx.Locale.Tr "repo.diff.load"}}</button>
+										{{else}}
+											{{ctx.Locale.Tr "repo.diff.bin_not_shown"}}
+										{{end}}
+									</div>
+								{{else if $file.SubmoduleDiffInfo}}
+									<div class="tw-p-3 flex-text-block">{{svg "octicon-file-submodule"}} {{$submoduleDiffInfo := $file.SubmoduleDiffInfo -}}
+										{{- $submoduleName := $submoduleDiffInfo.SubmoduleRepoLinkHTML ctx -}}
+										{{- if $file.IsDeleted -}}
+											{{- ctx.Locale.Tr "repo.diff.submodule_deleted" $submoduleName ($submoduleDiffInfo.CommitRefIDLinkHTML ctx $submoduleDiffInfo.PreviousRefID) -}}
+										{{- else if $file.IsCreated -}}
+											{{- ctx.Locale.Tr "repo.diff.submodule_added" $submoduleName ($submoduleDiffInfo.CommitRefIDLinkHTML ctx $submoduleDiffInfo.NewRefID) -}}
+										{{- else -}}
+											{{- ctx.Locale.Tr "repo.diff.submodule_updated" $submoduleName ($submoduleDiffInfo.CompareRefIDLinkHTML ctx) -}}
+										{{end}}
+									</div>
+								{{else if $file.Sections}}
+									<table class="chroma" data-paste-markdown-skip data-new-comment-url="{{$.Issue.Link}}/files/reviews/new_comment" data-path="{{$file.Name}}">
+										{{if $.IsSplitStyle}}
+											{{template "repo/diff/section_split" dict "file" $file}}
+										{{else}}
+											{{template "repo/diff/section_unified" dict "file" $file}}
+										{{end}}
+									</table>
+								{{else if $file.IsRenamed}}
+									<div class="tw-p-3">{{ctx.Locale.Tr "repo.diff.file_renamed_no_changes"}}</div>
+								{{else if and $file.EntryMode $file.OldEntryMode}}
+									<div class="tw-p-3">{{ctx.Locale.Tr "repo.diff.file_mode_changed"}}</div>
+								{{else}}
+									<div class="tw-p-3">{{ctx.Locale.Tr "repo.diff.file_whitespace_only_changes"}}</div>
+								{{end}}
+							</div>
+							{{if $showFileViewToggle}}
+								{{/* for image or CSV, it can have a horizontal scroll bar, there won't be review comment context menu (position absolute) which would be clipped by "overflow" */}}
+								<div id="diff-rendered-{{$file.NameHash}}" class="file-body file-code {{if $.IsSplitStyle}}code-diff-split{{else}}code-diff-unified{{end}} tw-overflow-x-scroll">
+									<table class="chroma tw-w-full">
+										{{if $isImage}}
+											{{template "repo/diff/image_diff" dict "file" $file}}
+										{{else if $isCsv}}
+											{{template "repo/diff/csv_diff" dict "file" $file}}
+										{{end}}
+									</table>
+								</div>
+							{{end}}
+						</div>
+					</div>
+				{{end}}
+
+				{{if .Diff.IsIncomplete}}
+					<div class="ui segment flex-left-right" id="diff-incomplete">
+						<span id="diff-load-progress" class="tw-text-text-light-2" data-text-too-many-files="{{ctx.Locale.Tr "repo.diff.too_many_files"}}">
+							{{ctx.Locale.Tr "repo.diff.too_many_files" (len .Diff.Files) .DiffShortStat.NumFiles}}
+						</span>
+						<button type="button" class="ui basic tiny button" id="diff-show-more-files" data-global-click="diffLoadMoreFiles" data-href="?skip-to={{.Diff.End}}&file-only=true"
+							data-text-default="{{ctx.Locale.Tr "repo.diff.show_more"}}"
+							data-text-matching="{{ctx.Locale.Tr "repo.diff.show_more_matching"}}"
+						>{{ctx.Locale.Tr "repo.diff.show_more"}}</button>
+					</div>
+				{{end}}
+				</div>
+			</div>
+		{{end}}
 	</div>
-{{end}}
+
+	{{if and (not $.Repository.IsArchived) (not .DiffNotAvailable)}}
+		<template id="issue-comment-editor-template">
+			<form class="ui form comment">
+				<div class="field">
+				{{template "shared/combomarkdowneditor" (dict
+					"CustomInit" true
+					"MarkdownEditorContext" (ctx.MiscUtils.MarkdownEditorComment $.Repository)
+					"TextareaName" "content"
+					"DropzoneParentContainer" ".ui.form"
+				)}}
+				</div>
+				{{if .IsAttachmentEnabled}}
+					<div class="field">
+						{{template "repo/upload" dict "UploadOptions" $.UploadOptions}}
+					</div>
+				{{end}}
+				<div class="field flex-text-block tw-justify-end">
+					<button type="button" class="ui cancel button">{{ctx.Locale.Tr "repo.issues.cancel"}}</button>
+					<button type="submit" class="ui primary button">{{ctx.Locale.Tr "repo.issues.save"}}</button>
+				</div>
+			</form>
+		</template>
+	{{end}}
+	{{if (not .DiffNotAvailable)}}
+		{{template "repo/issue/view_content/reference_issue_dialog" .}}
+		{{template "shared/user/block_user_dialog" .}}
+	{{end}}
+</div>

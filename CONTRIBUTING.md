@@ -1,354 +1,294 @@
 # Contribution Guidelines
 
-## Table of Contents
+This document explains how to contribute changes to the Gitea project. Topic-specific guides live in separate files so the essentials are easier to find.
+
+| Topic                  | Document                                                         |
+|:-----------------------|:-----------------------------------------------------------------|
+| Setup and requirements | [docs/build-setup.md](docs/build-setup.md)                       |
+| Development workflow   | [docs/development.md](docs/development.md)                       |
+| Build from source      | [docs/build-source.md](docs/build-source.md)                     |
+| Running the tests      | [docs/testing.md](docs/testing.md)                               |
+| Frontend guidelines    | [docs/guidelines-frontend.md](docs/guidelines-frontend.md)       |
+| Backend guidelines     | [docs/guidelines-backend.md](docs/guidelines-backend.md)         |
+| Refactoring            | [docs/guidelines-refactoring.md](docs/guidelines-refactoring.md) |
+| Community Governance   | [docs/community-governance.md](docs/community-governance.md)     |
+| Release management     | [docs/release-management.md](docs/release-management.md)         |
+
+<details><summary>Table of Contents</summary>
 
 - [Contribution Guidelines](#contribution-guidelines)
   - [Introduction](#introduction)
-  - [Bug reports](#bug-reports)
-  - [Discuss your design](#discuss-your-design)
-  - [Testing redux](#testing-redux)
-  - [Vendoring](#vendoring)
+  - [AI Contribution Policy](#ai-contribution-policy)
+  - [Issues](#issues)
+    - [How to report issues](#how-to-report-issues)
+    - [Types of issues](#types-of-issues)
+    - [Discuss your design before the implementation](#discuss-your-design-before-the-implementation)
+    - [Issue locking](#issue-locking)
+  - [Building Gitea](#building-gitea)
+  - [Styleguide](#styleguide)
+  - [Copyright](#copyright)
+  - [Testing](#testing)
   - [Translation](#translation)
   - [Code review](#code-review)
-  - [Styleguide](#styleguide)
-  - [Design guideline](#design-guideline)
-  - [API v1](#api-v1)
+    - [Pull request format](#pull-request-format)
+    - [PR title and summary](#pr-title-and-summary)
+    - [Breaking PRs](#breaking-prs)
+      - [What is a breaking PR?](#what-is-a-breaking-pr)
+      - [How to handle breaking PRs?](#how-to-handle-breaking-prs)
+    - [Maintaining open PRs](#maintaining-open-prs)
+    - [Reviewing PRs](#reviewing-prs)
+      - [For PR authors](#for-pr-authors)
+  - [Documentation](#documentation)
   - [Developer Certificate of Origin (DCO)](#developer-certificate-of-origin-dco)
-  - [Release Cycle](#release-cycle)
-  - [Maintainers](#maintainers)
-  - [Owners](#owners)
-  - [Versions](#versions)
-  - [Releasing Gitea](#releasing-gitea)
-  - [Copyright](#copyright)
+
+</details>
 
 ## Introduction
 
-This document explains how to contribute changes to the Gitea project.
-It assumes you have followed the
-[installation instructions](https://docs.gitea.io/en-us/).
-Sensitive security-related issues should be reported to
-[security@gitea.io](mailto:security@gitea.io).
+It assumes you have followed the [installation instructions](https://docs.gitea.com/category/installation). \
+Sensitive security-related issues should be reported to [security@gitea.io](mailto:security@gitea.io).
 
-For configuring IDE or code editor to develop Gitea see [IDE and code editor configuration](contrib/ide/)
+For configuring IDEs for Gitea development, see the [IDE setup notes](docs/development.md#ide-configuration) and the [contributed configurations](contrib/development/).
 
-## Bug reports
+## AI Contribution Policy
 
-Please search the issues on the issue tracker with a variety of keywords
-to ensure your bug is not already reported.
+Contributions made with the assistance of AI tools are welcome, but contributors must use them responsibly and disclose that use clearly.
 
-If unique, [open an issue](https://github.com/go-gitea/gitea/issues/new)
-and answer the questions so we can understand and reproduce the
-problematic behavior.
+1. Review AI-generated code closely before marking a pull request ready for review.
+2. Manually test the changes and add appropriate automated tests where feasible.
+3. Only use AI to assist in contributions that you understand well enough to explain, defend, and revise yourself during review.
+4. Disclose AI-assisted content clearly.
+5. Do not rely solely on AI to generate replies or engage in discussions.
+   Ensure your responses are concise, accurate, and thoughtful, avoiding generic or low-quality AI-generated content.
+6. AI may be used to help draft issues and pull requests, but contributors remain responsible for the accuracy, completeness, and intent of what they submit.
 
-To show us that the issue you are having is in Gitea itself, please
-write clear, concise instructions so we can reproduce the behavior—
-even if it seems obvious. The more detailed and specific you are,
-the faster we can fix the issue. Check out [How to Report Bugs
-Effectively](http://www.chiark.greenend.org.uk/~sgtatham/bugs.html).
+Collaborators and maintainers reserve the right to close pull requests and issues that do not disclose AI assistance, that appear to be low-quality AI-generated content, or where the contributor cannot explain or defend the proposed changes themselves.
 
-Please be kind, remember that Gitea comes at no cost to you, and you're
-getting free help.
+We welcome new contributors, but cannot sustain the effort of supporting contributors who primarily defer to AI rather than engaging substantively with the review process.
 
-## Discuss your design
+## Issues
 
-The project welcomes submissions. If you want to change or add something,
-please let everyone know what you're working on—[file an issue](https://github.com/go-gitea/gitea/issues/new)!
-Significant changes must go through the change proposal process
-before they can be accepted. To create a proposal, file an issue with
-your proposed changes documented, and make sure to note in the title
-of the issue that it is a proposal.
+### How to report issues
 
-This process gives everyone a chance to validate the design, helps
-prevent duplication of effort, and ensures that the idea fits inside
-the goals for the project and tools. It also checks that the design is
-sound before code is written; the code review tool is not the place for
-high-level discussions.
+Please search the issues on the issue tracker with a variety of related keywords to ensure that your issue has not already been reported.
 
-## Testing redux
+If your issue has not been reported yet, [open an issue](https://github.com/go-gitea/gitea/issues/new)
+and answer the questions so we can understand and reproduce the problematic behavior. \
+Please write clear and concise instructions so that we can reproduce the behavior — even if it seems obvious. \
+The more detailed and specific you are, the faster we can fix the issue. \
+It is really helpful if you can reproduce your problem on a site running on the latest commits, i.e. <https://demo.gitea.com>, as perhaps your problem has already been fixed on a current version. \
+Please follow the guidelines described in [How to Report Bugs Effectively](http://www.chiark.greenend.org.uk/~sgtatham/bugs.html) for your report.
 
-Before submitting a pull request, run all the tests for the whole tree
-to make sure your changes don't cause regression elsewhere.
+Please be kind—remember that Gitea comes at no cost to you, and you're getting free help.
 
-Here's how to run the test suite:
+### Types of issues
 
-- code lint
+Typically, issues fall in one of the following categories:
 
-|                       |                                                                   |
-| :-------------------- | :---------------------------------------------------------------- |
-|``make lint``          | lint everything (not suggest if you only change one type code)    |
-|``make lint-frontend`` | lint frontend files  |
-|``make lint-backend``  | lint backend files   |
+- `bug`: Something in the frontend or backend behaves unexpectedly
+- `security issue`: bug that has serious implications such as leaking another users data. Please do not file such issues on the public tracker and send a mail to security@gitea.io instead
+- `feature`: Completely new functionality. You should describe this feature in enough detail that anyone who reads the issue can understand how it is supposed to be implemented
+- `enhancement`: An existing feature should get an upgrade
+- `refactoring`: Parts of the code base don't conform with other parts and should be changed to improve Gitea's maintainability
 
-- run test code (Suggest run in linux)  
+### Discuss your design before the implementation
 
-|                                        |                                                  |
-| :------------------------------------- | :----------------------------------------------- |
-|``make test[\#TestSpecificName]``       |  run unit test  |
-|``make test-sqlite[\#TestSpecificName]``|  run [integration](integrations) test for sqlite |  
-|[More detail message about integrations](integrations/README.md)  |
+We welcome submissions. \
+If you want to change or add something, please let everyone know what you're working on — [file an issue](https://github.com/go-gitea/gitea/issues/new) or comment on an existing one before starting your work!
 
-## Vendoring
+Significant changes such as new features must go through the change proposal process before they can be accepted. \
+This is mainly to save yourself the trouble of implementing it, only to find out that your proposed implementation has some potential problems. \
+Furthermore, this process gives everyone a chance to validate the design, helps prevent duplication of effort, and ensures that the idea fits inside
+the goals for the project and tools.
 
-We keep a cached copy of dependencies within the `vendor/` directory,
-managing updates via [Modules](https://golang.org/cmd/go/#hdr-Module_maintenance).
+Pull requests should not be the place for architecture discussions.
 
-Pull requests should only include `vendor/` updates if they are part of
-the same change, be it a bugfix or a feature addition.
+### Issue locking
 
-The `vendor/` update needs to be justified as part of the PR description,
-and must be verified by the reviewers and/or merger to always reference
-an existing upstream commit.
-
-You can find more information on how to get started with it on the [Modules Wiki](https://github.com/golang/go/wiki/Modules).
-
-## Translation
-
-We do all translation work inside [Crowdin](https://crowdin.com/project/gitea).
-The only translation that is maintained in this git repository is
-[`en_US.ini`](https://github.com/go-gitea/gitea/blob/master/options/locale/locale_en-US.ini)
-and is synced regularly to Crowdin. Once a translation has reached
-A SATISFACTORY PERCENTAGE it will be synced back into this repo and
-included in the next released version.
+Commenting on closed or merged issues/PRs is strongly discouraged.
+Such comments will likely be overlooked as some collaborators and maintainers may not view notifications on closed issues, thinking that the item is resolved.
+As such, commenting on closed/merged issues/PRs may be disabled prior to the scheduled auto-locking if a discussion starts or if unrelated comments are posted.
+If further discussion is needed, we encourage you to open a new issue instead and we recommend linking to the issue/PR in question for context.
 
 ## Building Gitea
 
-See the [hacking instructions](https://docs.gitea.io/en-us/hacking-on-gitea/).
-
-## Code review
-
-Changes to Gitea must be reviewed before they are accepted—no matter who
-makes the change, even if they are an owner or a maintainer. We use GitHub's
-pull request workflow to do that. And, we also use [LGTM](http://lgtm.co)
-to ensure every PR is reviewed by at least 2 maintainers.
-
-Please try to make your pull request easy to review for us. And, please read
-the *[How to get faster PR reviews](https://github.com/kubernetes/community/blob/261cb0fd089b64002c91e8eddceebf032462ccd6/contributors/guide/pull-requests.md#best-practices-for-faster-reviews)* guide;
-it has lots of useful tips for any project you may want to contribute.
-Some of the key points:
-
-* Make small pull requests. The smaller, the faster to review and the
-  more likely it will be merged soon.
-* Don't make changes unrelated to your PR. Maybe there are typos on
-  some comments, maybe refactoring would be welcome on a function... but
-  if that is not related to your PR, please make *another* PR for that.
-* Split big pull requests into multiple small ones. An incremental change
-  will be faster to review than a huge PR.
+See [docs/build-setup.md](docs/build-setup.md) for prerequisites and [docs/development.md](docs/development.md)
+for building Gitea and the development workflow.
 
 ## Styleguide
 
-For imports you should use the following format (_without_ the comments)
-```go
-import (
-  // stdlib
-  "encoding/json"
-  "fmt"
+You should always run `make fmt` before committing to conform to Gitea's styleguide.
 
-  // local packages
-  "code.gitea.io/gitea/models"
-  "code.gitea.io/sdk/gitea"
+## Copyright
 
-  // external packages
-  "github.com/foo/bar"
-  "gopkg.io/baz.v1"
-)
+New code files that you contribute should use the standard copyright header:
+
+```
+// Copyright <current year> The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
 ```
 
-## Design guideline
+Afterwards, copyright should only be modified when the copyright author changes.
 
-To maintain understandable code and avoid circular dependencies it is important to have a good structure of the code. The gitea code is divided into the following parts:
+## Testing
 
-- **integration:** Integrations tests
-- **models:** Contains the data structures used by xorm to construct database tables. It also contains supporting functions to query and update the database. Dependecies to other code in Gitea should be avoided although some modules might be needed (for example for logging).
-- **models/fixtures:** Sample model data used in integration tests.
-- **models/migrations:** Handling of database migrations between versions. PRs that changes a database structure shall also have a migration step.
-- **modules:** Different modules to handle specific functionality in Gitea.
-- **public:** Frontend files (javascript, images, css, etc.)
-- **routers:** Handling of server requests. As it uses other Gitea packages to serve the request, other packages (models, modules or services) shall not depend on routers
-- **services:** Support functions for common routing operations. Uses models and modules to handle the request.
-- **templates:** Golang templates for generating the html output.
-- **vendor:** External code that Gitea depends on.
+Before submitting a pull request, run the linters (`make lint`, or the scoped `make lint-backend` / `make lint-frontend`) and the tests to make sure your changes don't cause a regression elsewhere. See [docs/testing.md](docs/testing.md) for how to run the unit, integration, end-to-end, and migration tests.
 
-## API v1
+## Translation
 
-The API is documented by [swagger](http://try.gitea.io/api/swagger) and is based on [GitHub API v3](https://developer.github.com/v3/).
-Thus, Gitea´s API should use the same endpoints and fields as GitHub´s API as far as possible, unless there are good reasons to deviate.  
-If Gitea provides functionality that GitHub does not, a new endpoint can be created.  
-If information is provided by Gitea that is not provided by the GitHub API, a new field can be used that doesn't collide with any GitHub fields.
+All translation work happens on [Crowdin](https://translate.gitea.com).
+The only translation that is maintained in this repository is [the English translation](https://github.com/go-gitea/gitea/blob/main/options/locale/locale_en-US.json).
+It is synced regularly with Crowdin. \
+Other locales on main branch **should not** be updated manually as they will be overwritten with each sync. \
+Once a language has reached a **satisfactory percentage** of translated keys (~25%), it will be synced back into this repo and included in the next released version.
 
-Updating an existing API should not remove existing fields unless there is a really good reason to do so.
-The same applies to status responses. If you notice a problem, feel free to leave a comment in the code for future refactoring to APIv2 (which is currently not planned).
+The tool `go run build/backport-locale.go` can be used to backport locales from the main branch to release branches that were missed.
 
-All expected results (errors, success, fail messages) should be documented
-([example](https://github.com/go-gitea/gitea/blob/c620eb5b2d0d874da68ebd734d3864c5224f71f7/routers/api/v1/repo/issue.go#L319-L327)).
+## Code review
 
-All JSON input types must be defined as a struct in `models/structs/`
-([example](https://github.com/go-gitea/gitea/blob/c620eb5b2d0d874da68ebd734d3864c5224f71f7/modules/structs/issue.go#L76-L91))
-and referenced in
-[routers/api/v1/swagger/options.go](https://github.com/go-gitea/gitea/blob/c620eb5b2d0d874da68ebd734d3864c5224f71f7/routers/api/v1/swagger/options.go).  
-They can then be used like the following:
-([example](https://github.com/go-gitea/gitea/blob/c620eb5b2d0d874da68ebd734d3864c5224f71f7/routers/api/v1/repo/issue.go#L318)).
+How labels, milestones, and the merge queue work is documented in [docs/community-governance.md](docs/community-governance.md).
 
-All JSON responses must be defined as a struct in `models/structs/`
-([example](https://github.com/go-gitea/gitea/blob/c620eb5b2d0d874da68ebd734d3864c5224f71f7/modules/structs/issue.go#L36-L68))
-and referenced in its category in `routers/api/v1/swagger/`
-([example](https://github.com/go-gitea/gitea/blob/c620eb5b2d0d874da68ebd734d3864c5224f71f7/routers/api/v1/swagger/issue.go#L11-L16))  
-They can be used like the following:
-([example](https://github.com/go-gitea/gitea/blob/c620eb5b2d0d874da68ebd734d3864c5224f71f7/routers/api/v1/repo/issue.go#L277-L279))
+### Pull request format
 
-In general, HTTP methods are chosen as follows:
- * **GET** endpoints return requested object and status **OK (200)**
- * **DELETE** endpoints return status **No Content (204)**
- * **POST** endpoints return status **Created (201)**, used to **create** new objects (e.g. a User)
- * **PUT** endpoints return status **No Content (204)**, used to **add/assign** existing Obejcts (e.g. User) to something (e.g. Org-Team)
- * **PATCH** endpoints return changed object and status **OK (200)**, used to **edit/change** an existing object
+Please try to make your pull request easy to review for us. \
+For that, please read the [*Best Practices for Faster Reviews*](https://github.com/kubernetes/community/blob/261cb0fd089b64002c91e8eddceebf032462ccd6/contributors/guide/pull-requests.md#best-practices-for-faster-reviews) guide. \
+It has lots of useful tips for any project you may want to contribute to. \
+Some of the key points:
 
+- Make small pull requests. \
+  The smaller, the faster to review and the more likely it will be merged soon.
+- Don't make changes unrelated to your PR. \
+  Maybe there are typos on some comments, maybe refactoring would be welcome on a function... \
+  but if that is not related to your PR, please make *another* PR for that.
+- Split big pull requests into multiple small ones. \
+  An incremental change will be faster to review than a huge PR.
+- Allow edits by maintainers. This way, the maintainers will take care of merging the PR later on instead of you.
 
-An endpoint which changes/edits an object expects all fields to be optional (except ones to identify the object, which are required).
+### PR title and summary
 
+In the PR title, describe the problem you are fixing, not how you are fixing it. \
+Use the first comment as a summary of your PR. \
+In the PR summary, you can describe exactly how you are fixing this problem.
+
+PR titles must follow the [Conventional Commits](https://www.conventionalcommits.org/) format, because PRs are squash-merged and the PR title becomes the resulting commit message and release notes entry:
+
+```text
+type(scope)!: subject
+```
+
+The scope in parentheses is optional. A `!` immediately before the colon marks a [breaking change](https://www.conventionalcommits.org/en/v1.0.0/#summary): either `type!:` or `type(scope)!:` (not `type!(scope):`). Do not mark `build`, `chore`, `ci`, `docs`, `style`, or `test` as breaking.
+
+Use one of these types:
+
+- `build`: Changes affecting the build system, packaging, or external dependencies
+- `ci`: Changes to CI/CD configuration files and scripts
+- `chore`: Maintenance changes that do not affect production code or should not appear in the changelog
+- `docs`: Documentation-only changes
+- `feat`: A larger user-facing feature, improvement, or new functionality
+- `enhance`: Small or trivial user-facing improvements or UX polish (for example wording changes, color adjustments, spacing or padding tweaks, placeholders, small UI behavior improvements)
+- `fix`: A bug fix, UX correction, or security-related dependency update
+- `perf`: Performance improvements (speed, memory, scalability)
+- `refactor`: A code change that neither fixes a bug nor adds a feature
+- `revert`: Reverts a previous change
+- `style`: Formatting or style-only changes that do not affect code behavior (for example lint-driven edits)
+- `test`: Adding or correcting tests
+
+Examples:
+
+```text
+fix(web): prevent avatar upload crash on empty file
+feat(api): add pagination to repo hooks list
+enhance(repo): improve diff toolbar spacing
+ci(workflows): lint PR titles in CI
+```
+
+Keep this summary up-to-date as the PR evolves. \
+If your PR changes the UI, you must add **after** screenshots in the PR summary. \
+If you are not implementing a new feature, you should also post **before** screenshots for comparison.
+
+If you are implementing a new feature, your PR will only be merged if your screenshots are up to date.\
+Furthermore, feature PRs will only be merged if their summary contains a clear usage description (understandable for users) and testing description (understandable for reviewers).
+You should strive to combine both into a single description.
+
+Another requirement for merging PRs is that the PR is labeled correctly.\
+However, this is not your job as a contributor, but the job of the person merging your PR.\
+If you think that your PR was labeled incorrectly, or notice that it was merged without labels, please let us know.
+
+For pull requests that use a valid Conventional Commits title, CI automatically applies a matching `type/…` label when the title prefix is `feat`, `enhance`, `fix`, `docs`, or `test` (for example `enhance(web): …` receives `type/enhancement`).\
+That label is kept in sync with the PR title when the title is edited.\
+Other title prefixes do not get an automatic `type/…` label; the maintainer who merges still assigns the correct labels (including `type/…` when needed) for changelog and backport decisions.
+
+If your PR closes some issues, you must note that in a way that both GitHub and Gitea understand, i.e. by appending a paragraph like
+
+```text
+Fixes/Closes/Resolves #<ISSUE_NR_X>.
+Fixes/Closes/Resolves #<ISSUE_NR_Y>.
+```
+
+to your summary. \
+Each issue that will be closed must stand on a separate line.
+
+### Breaking PRs
+
+#### What is a breaking PR?
+
+A PR is breaking if it meets one of the following criteria:
+
+- It changes API output in an incompatible way for existing users
+- It removes a setting that an admin could previously set (i.e. via `app.ini`)
+- An admin must do something manually to restore the old behavior
+
+In particular, this means that adding new settings is not breaking.\
+Changing the default value of a setting or replacing the setting with another one is breaking, however.
+
+#### How to handle breaking PRs?
+
+If your PR has a breaking change, you must add two things to the summary of your PR:
+
+1. A reasoning why this breaking change is necessary
+2. A `BREAKING` section explaining in simple terms (understandable for a typical user) how this PR affects users and how to mitigate these changes. This section can look for example like
+
+```md
+## :warning: BREAKING :warning:
+```
+
+Breaking PRs will not be merged as long as not both of these requirements are met.
+
+### Maintaining open PRs
+
+Code review starts when you open a non-draft PR or move a draft out of draft state. After that, do not rebase or squash your branch; it makes new changes harder to review.
+
+Merge the base branch into yours only when you need to, for example because of conflicting changes elsewhere. That limits unnecessary CI runs.
+
+Every PR is squash-merged, so merge commits on your branch do not matter for final history. The squash produces a single commit; maintainers follow the [commit message format](docs/community-governance.md#commit-messages) in the governance guide.
+
+### Reviewing PRs
+
+Collaborators and maintainers are encouraged to review pull requests in areas where they have expertise or particular interest.
+
+#### For PR authors
+
+- **Response**: When answering reviewer questions, use real-world cases or examples and avoid speculation.
+- **Discussion**: A discussion is always welcome and should be used to clarify the changes and the intent of the PR.
+- **Help**: If you need help with the PR or comments are unclear, ask for clarification.
+
+Guidance for reviewers, the merge queue, and the squash commit message format is in [docs/community-governance.md](docs/community-governance.md).
+
+## Documentation
+
+If you add a new feature or change an existing aspect of Gitea, the documentation for that feature must be created or updated in another PR at [https://gitea.com/gitea/docs](https://gitea.com/gitea/docs).
+**The docs directory on main repository will be removed at some time. We will have a yaml file to store configuration file's meta data. After that completed, configuration documentation should be in the main repository.**
 
 ## Developer Certificate of Origin (DCO)
 
-We consider the act of contributing to the code by submitting a Pull
-Request as the "Sign off" or agreement to the certifications and terms
-of the [DCO](DCO) and [MIT license](LICENSE). No further action is required.
-Additionally you could add a line at the end of your commit message.
+We consider the act of contributing to the code by submitting a Pull Request as the "Sign off" or agreement to the certifications and terms of the [DCO](DCO) and [MIT license](LICENSE). \
+No further action is required. \
+You can also decide to sign off your commits by adding the following line at the end of your commit messages:
 
 ```
 Signed-off-by: Joe Smith <joe.smith@email.com>
 ```
 
-If you set your `user.name` and `user.email` git configs, you can add the
-line to the end of your commit automatically with `git commit -s`.
+If you set the `user.name` and `user.email` Git config options, you can add the line to the end of your commits automatically with `git commit -s`.
 
 We assume in good faith that the information you provide is legally binding.
-
-## Release Cycle
-
-We adopted a release schedule to streamline the process of working
-on, finishing, and issuing releases. The overall goal is to make a
-minor release every two months, which breaks down into one month of
-general development followed by one month of testing and polishing
-known as the release freeze. All the feature pull requests should be
-merged in the first month of one release period. And, during the frozen
-period, a corresponding release branch is open for fixes backported from
-master. Release candidates are made during this period for user testing to
-obtain a final version that is maintained in this branch. A release is
-maintained by issuing patch releases to only correct critical problems
-such as crashes or security issues.
-
-Major release cycles are bimonthly. They always begin on the 25th and end on
-the 24th (i.e., the 25th of December to February 24th).
-
-During a development cycle, we may also publish any necessary minor releases
-for the previous version. For example, if the latest, published release is
-v1.2, then minor changes for the previous release—e.g., v1.1.0 -> v1.1.1—are
-still possible.
-
-## Maintainers
-
-To make sure every PR is checked, we have [team
-maintainers](MAINTAINERS). Every PR **MUST** be reviewed by at least
-two maintainers (or owners) before it can get merged. A maintainer
-should be a contributor of Gitea (or Gogs) and contributed at least
-4 accepted PRs. A contributor should apply as a maintainer in the
-[Discord](https://discord.gg/NsatcWJ) #develop channel. The owners
-or the team maintainers may invite the contributor. A maintainer
-should spend some time on code reviews. If a maintainer has no
-time to do that, they should apply to leave the maintainers team
-and we will give them the honor of being a member of the [advisors
-team](https://github.com/orgs/go-gitea/teams/advisors). Of course, if
-an advisor has time to code review, we will gladly welcome them back
-to the maintainers team. If a maintainer is inactive for more than 3
-months and forgets to leave the maintainers team, the owners may move
-him or her from the maintainers team to the advisors team.
-For security reasons, Maintainers should use 2FA for their accounts and
-if possible provide gpg signed commits.
-https://help.github.com/articles/securing-your-account-with-two-factor-authentication-2fa/
-https://help.github.com/articles/signing-commits-with-gpg/
-
-## Owners
-
-Since Gitea is a pure community organization without any company support,
-to keep the development healthy we will elect three owners every year. All
-contributors may vote to elect up to three candidates, one of which will
-be the main owner, and the other two the assistant owners. When the new
-owners have been elected, the old owners will give up ownership to the
-newly elected owners. If an owner is unable to do so, the other owners
-will assist in ceding ownership to the newly elected owners.
-For security reasons, Owners or any account with write access (like a bot)
-must use 2FA.
-https://help.github.com/articles/securing-your-account-with-two-factor-authentication-2fa/
-
-After the election, the new owners should proactively agree
-with our [CONTRIBUTING](CONTRIBUTING.md) requirements in the
-[Discord](https://discord.gg/NsatcWJ) #general channel. Below are the
-words to speak:
-
-```
-I'm honored to having been elected an owner of Gitea, I agree with
-[CONTRIBUTING](CONTRIBUTING.md). I will spend part of my time on Gitea
-and lead the development of Gitea.
-```
-
-To honor the past owners, here's the history of the owners and the time
-they served:
-
-* 2020-01-01 ~ 2020-12-31 - https://github.com/go-gitea/gitea/issues/9230
-  * [Lunny Xiao](https://gitea.com/lunny) <xiaolunwen@gmail.com>
-  * [Lauris Bukšis-Haberkorns](https://gitea.com/lafriks) <lauris@nix.lv>
-  * [Matti Ranta](https://gitea.com/techknowlogick) <techknowlogick@gitea.io>
-
-* 2019-01-01 ~ 2019-12-31 - https://github.com/go-gitea/gitea/issues/5572
-  * [Lunny Xiao](https://github.com/lunny) <xiaolunwen@gmail.com>
-  * [Lauris Bukšis-Haberkorns](https://github.com/lafriks) <lauris@nix.lv>
-  * [Matti Ranta](https://github.com/techknowlogick) <techknowlogick@gitea.io>
-
-* 2018-01-01 ~ 2018-12-31 - https://github.com/go-gitea/gitea/issues/3255
-  * [Lunny Xiao](https://github.com/lunny) <xiaolunwen@gmail.com>
-  * [Lauris Bukšis-Haberkorns](https://github.com/lafriks) <lauris@nix.lv>
-  * [Kim Carlbäcker](https://github.com/bkcsoft) <kim.carlbacker@gmail.com>
-
-* 2016-11-04 ~ 2017-12-31
-  * [Lunny Xiao](https://github.com/lunny) <xiaolunwen@gmail.com>
-  * [Thomas Boerger](https://github.com/tboerger) <thomas@webhippie.de>
-  * [Kim Carlbäcker](https://github.com/bkcsoft) <kim.carlbacker@gmail.com>
-
-## Versions
-
-Gitea has the `master` branch as a tip branch and has version branches
-such as `release/v0.9`. `release/v0.9` is a release branch and we will
-tag `v0.9.0` for binary download. If `v0.9.0` has bugs, we will accept
-pull requests on the `release/v0.9` branch and publish a `v0.9.1` tag,
-after bringing the bug fix also to the master branch.
-
-Since the `master` branch is a tip version, if you wish to use Gitea
-in production, please download the latest release tag version. All the
-branches will be protected via GitHub, all the PRs to every branch must
-be reviewed by two maintainers and must pass the automatic tests.
-
-## Releasing Gitea
-
-* Let $vmaj, $vmin and $vpat be Major, Minor and Patch version numbers, $vpat should be rc1, rc2, 0, 1, ...... $vmaj.$vmin will be kept the same as milestones on github or gitea in future.
-* Before releasing, confirm all the version's milestone issues or PRs has been resolved. Then discuss the release on discord channel #maintainers and get agreed with almost all the owners and mergers. Or you can declare the version and if nobody against in about serval hours.
-* If this is a big version first you have to create PR for changelog on branch `master` with PRs with label `changelog` and after it has been merged do following steps:
-  * Create `-dev` tag as `git tag -s -F release.notes v$vmaj.$vmin.0-dev` and push the tag as `git push origin v$vmaj.$vmin.0-dev`.
-  * When CI has finished building tag then you have to create a new branch named `release/v$vmaj.$vmin`
-* If it is bugfix version create PR for changelog on branch `release/v$vmaj.$vmin` and wait till it is reviewed and merged.
-* Add a tag as `git tag -s -F release.notes v$vmaj.$vmin.$`, release.notes file could be a temporary file to only include the changelog this version which you added to `CHANGELOG.md`.
-* And then push the tag as `git push origin v$vmaj.$vmin.$`. Drone CI will automatically created a release and upload all the compiled binary. (But currently it didn't add the release notes automatically. Maybe we should fix that.)
-* If needed send PR for changelog on branch `master`.
-* Send PR to [blog repository](https://gitea.com/gitea/blog) announcing the release.
-
-## Copyright
-
-Code that you contribute should use the standard copyright header:
-
-```
-// Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
-```
-
-Files in the repository contain copyright from the year they are added
-to the year they are last changed. If the copyright author is changed,
-just paste the header below the old one.

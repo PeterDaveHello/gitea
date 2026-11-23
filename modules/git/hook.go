@@ -1,19 +1,18 @@
 // Copyright 2015 The Gogs Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// Copyright 2021 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
 
 package git
 
 import (
 	"errors"
-	"io/ioutil"
 	"os"
-	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
-	"code.gitea.io/gitea/modules/util"
-	"github.com/unknwon/com"
+	"gitea.dev/modules/git/gitrepo"
+	"gitea.dev/modules/util"
 )
 
 // hookNames is a list of Git server hooks' name that are supported.
@@ -23,19 +22,9 @@ var hookNames = []string{
 	"post-receive",
 }
 
-var (
-	// ErrNotValidHook error when a git hook is not valid
-	ErrNotValidHook = errors.New("not a valid Git hook")
-)
-
 // IsValidHookName returns true if given name is a valid Git hook.
 func IsValidHookName(name string) bool {
-	for _, hn := range hookNames {
-		if hn == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(hookNames, name)
 }
 
 // Hook represents a Git hook.
@@ -48,27 +37,25 @@ type Hook struct {
 }
 
 // GetHook returns a Git hook by given name and repository.
-func GetHook(repoPath, name string) (*Hook, error) {
+func GetHook(repo RepositoryFacade, name string) (*Hook, error) {
+	repoPath := gitrepo.RepoLocalPath(repo)
 	if !IsValidHookName(name) {
-		return nil, ErrNotValidHook
+		return nil, util.NewNotExistErrorf("invalid hook name: %s", name)
 	}
 	h := &Hook{
 		name: name,
-		path: path.Join(repoPath, "hooks", name+".d", name),
+		path: filepath.Join(repoPath, filepath.Join("hooks", name+".d", name)),
 	}
-	samplePath := filepath.Join(repoPath, "hooks", name+".sample")
-	if isFile(h.path) {
-		data, err := ioutil.ReadFile(h.path)
-		if err != nil {
-			return nil, err
-		}
+	if data, err := os.ReadFile(h.path); err == nil {
 		h.IsActive = true
 		h.Content = string(data)
-	} else if isFile(samplePath) {
-		data, err := ioutil.ReadFile(samplePath)
-		if err != nil {
-			return nil, err
-		}
+		return h, nil
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	samplePath := filepath.Join(repoPath, "hooks", name+".sample")
+	if data, err := os.ReadFile(samplePath); err == nil {
 		h.Sample = string(data)
 	}
 	return h, nil
@@ -82,11 +69,10 @@ func (h *Hook) Name() string {
 // Update updates hook settings.
 func (h *Hook) Update() error {
 	if len(strings.TrimSpace(h.Content)) == 0 {
-		if isExist(h.path) {
-			err := util.Remove(h.path)
-			if err != nil {
-				return err
-			}
+		// empty content means to remove the file
+		err := util.RemoveWithRetry(h.path)
+		if err != nil && !os.IsNotExist(err) {
+			return err
 		}
 		h.IsActive = false
 		return nil
@@ -96,7 +82,7 @@ func (h *Hook) Update() error {
 		return err
 	}
 
-	err := ioutil.WriteFile(h.path, []byte(strings.Replace(h.Content, "\r", "", -1)), os.ModePerm)
+	err := os.WriteFile(h.path, []byte(strings.ReplaceAll(h.Content, "\r", "")), os.ModePerm)
 	if err != nil {
 		return err
 	}
@@ -105,37 +91,20 @@ func (h *Hook) Update() error {
 }
 
 // ListHooks returns a list of Git hooks of given repository.
-func ListHooks(repoPath string) (_ []*Hook, err error) {
-	if !isDir(path.Join(repoPath, "hooks")) {
+func ListHooks(repo RepositoryFacade) (_ []*Hook, err error) {
+	exist, err := util.IsDir(filepath.Join(gitrepo.RepoLocalPath(repo), "hooks"))
+	if err != nil {
+		return nil, err
+	} else if !exist {
 		return nil, errors.New("hooks path does not exist")
 	}
 
 	hooks := make([]*Hook, len(hookNames))
 	for i, name := range hookNames {
-		hooks[i], err = GetHook(repoPath, name)
+		hooks[i], err = GetHook(repo, name)
 		if err != nil {
 			return nil, err
 		}
 	}
 	return hooks, nil
-}
-
-const (
-	// HookPathUpdate hook update path
-	HookPathUpdate = "hooks/update"
-)
-
-// SetUpdateHook writes given content to update hook of the reposiotry.
-func SetUpdateHook(repoPath, content string) (err error) {
-	log("Setting update hook: %s", repoPath)
-	hookPath := path.Join(repoPath, HookPathUpdate)
-	if com.IsExist(hookPath) {
-		err = util.Remove(hookPath)
-	} else {
-		err = os.MkdirAll(path.Dir(hookPath), os.ModePerm)
-	}
-	if err != nil {
-		return err
-	}
-	return ioutil.WriteFile(hookPath, []byte(content), 0777)
 }

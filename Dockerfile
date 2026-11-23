@@ -1,33 +1,58 @@
+# syntax=docker/dockerfile:1
+# Build frontend on the native platform to avoid QEMU-related issues with nodejs ecosystem
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27-alpine3.24 AS frontend-build
+RUN apk --no-cache add build-base git nodejs pnpm
+WORKDIR /src
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store pnpm install --frozen-lockfile
+COPY --exclude=.git/ . .
+RUN make frontend
 
-###################################
-#Build stage
-FROM golang:1.15-alpine3.12 AS build-env
-
-ARG GOPROXY
-ENV GOPROXY ${GOPROXY:-direct}
+# Cross-compile backend on the native platform to avoid slow QEMU emulation
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27-alpine3.24 AS build-env
 
 ARG GITEA_VERSION
-ARG TAGS="sqlite sqlite_unlock_notify"
-ENV TAGS "bindata $TAGS"
+ARG TAGS=""
+ENV TAGS="bindata timetzdata $TAGS"
 ARG CGO_EXTRA_CFLAGS
 
-#Build deps
-RUN apk --no-cache add build-base git nodejs npm
+# Build deps
+RUN apk --no-cache add \
+    build-base \
+    git
 
-#Setup repo
-COPY . ${GOPATH}/src/code.gitea.io/gitea
-WORKDIR ${GOPATH}/src/code.gitea.io/gitea
+WORKDIR ${GOPATH}/src/gitea.dev
+COPY go.mod go.sum ./
+RUN go mod download
+# Use COPY instead of bind mount as read-only one breaks makefile state tracking and read-write one needs binary to be moved as it's discarded.
+# ".git" directory is mounted separately later only for version data extraction.
+COPY --exclude=.git/ . .
+COPY --from=frontend-build /src/public/assets public/assets
+RUN --mount=type=cache,target="/root/.cache/go-build" make generate-backend
 
-#Checkout version if set
-RUN if [ -n "${GITEA_VERSION}" ]; then git checkout "${GITEA_VERSION}"; fi \
- && make clean-all build
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETVARIANT
+# Build gitea, .git mount is required for version data
+RUN --mount=type=cache,target="/root/.cache/go-build" \
+    --mount=type=bind,source=".git/",target=".git/" \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOARM=${TARGETVARIANT#v} make gitea
 
-FROM alpine:3.12
-LABEL maintainer="maintainers@gitea.io"
+COPY docker/root /tmp/local
+
+# Set permissions for builds that made under windows which strips the executable bit from file
+RUN chmod 755 /tmp/local/usr/bin/entrypoint \
+              /tmp/local/usr/local/bin/* \
+              /tmp/local/etc/s6/gitea/* \
+              /tmp/local/etc/s6/openssh/* \
+              /tmp/local/etc/s6/.s6-svscan/* \
+              /go/src/gitea.dev/gitea
+
+FROM docker.io/library/alpine:3.24 AS gitea
 
 EXPOSE 22 3000
 
-RUN apk --no-cache add \
+RUN apk --no-cache upgrade && apk --no-cache add \
     bash \
     ca-certificates \
     curl \
@@ -38,7 +63,6 @@ RUN apk --no-cache add \
     s6 \
     sqlite \
     su-exec \
-    tzdata \
     gnupg
 
 RUN addgroup \
@@ -51,16 +75,16 @@ RUN addgroup \
     -u 1000 \
     -G git \
     git && \
-  echo "git:$(dd if=/dev/urandom bs=24 count=1 status=none | base64)" | chpasswd
+  echo "git:*" | chpasswd -e
 
-ENV USER git
-ENV GITEA_CUSTOM /data/gitea
+COPY --from=build-env /tmp/local /
+COPY --from=build-env /go/src/gitea.dev/gitea /app/gitea/gitea
+
+ENV USER=git
+ENV GITEA_CUSTOM=/data/gitea
 
 VOLUME ["/data"]
 
+# HINT: HEALTH-CHECK-ENDPOINT: don't use HEALTHCHECK, search this hint keyword for more information
 ENTRYPOINT ["/usr/bin/entrypoint"]
-CMD ["/bin/s6-svscan", "/etc/s6"]
-
-COPY docker/root /
-COPY --from=build-env /go/src/code.gitea.io/gitea/gitea /app/gitea/gitea
-RUN ln -s /app/gitea/gitea /usr/local/bin/gitea
+CMD ["/usr/bin/s6-svscan", "/etc/s6"]

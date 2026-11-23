@@ -1,113 +1,152 @@
 // Copyright 2018 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package markup
 
 import (
-	"bytes"
-	"encoding/csv"
+	"bufio"
 	"html"
 	"io"
-	"regexp"
-	"strings"
+	"strconv"
 
-	"code.gitea.io/gitea/modules/markup"
-	"code.gitea.io/gitea/modules/util"
+	"gitea.dev/modules/csv"
+	"gitea.dev/modules/markup"
+	"gitea.dev/modules/setting"
+	"gitea.dev/modules/translation"
+	"gitea.dev/modules/util"
 )
 
-var quoteRegexp = regexp.MustCompile(`["'][\s\S]+?["']`)
-
 func init() {
-	markup.RegisterParser(Parser{})
-
+	markup.RegisterRenderer(Renderer{})
 }
 
-// Parser implements markup.Parser for orgmode
-type Parser struct {
-}
+type Renderer struct{}
 
-// Name implements markup.Parser
-func (Parser) Name() string {
+func (Renderer) Name() string {
 	return "csv"
 }
 
-// Extensions implements markup.Parser
-func (Parser) Extensions() []string {
-	return []string{".csv", ".tsv"}
+func (Renderer) FileNamePatterns() []string {
+	return []string{"*.csv", "*.tsv"}
 }
 
-// Render implements markup.Parser
-func (p Parser) Render(rawBytes []byte, urlPrefix string, metas map[string]string, isWiki bool) []byte {
-	rd := csv.NewReader(bytes.NewReader(rawBytes))
-	rd.Comma = p.bestDelimiter(rawBytes)
-	var tmpBlock bytes.Buffer
-	tmpBlock.WriteString(`<table class="table">`)
+func (Renderer) SanitizerRules() []setting.MarkupSanitizerRule {
+	return []setting.MarkupSanitizerRule{
+		{Element: "table", AllowAttr: "class", Regexp: `^data-table$`},
+		{Element: "th", AllowAttr: "class", Regexp: `^line-num$`},
+		{Element: "td", AllowAttr: "class", Regexp: `^line-num$`},
+	}
+}
+
+func writeField(w io.Writer, element, class, field string) error {
+	if _, err := io.WriteString(w, "<"); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, element); err != nil {
+		return err
+	}
+	if len(class) > 0 {
+		if _, err := io.WriteString(w, ` class="`); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, class); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, `"`); err != nil {
+			return err
+		}
+	}
+	if _, err := io.WriteString(w, ">"); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, html.EscapeString(field)); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, "</"); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, element); err != nil {
+		return err
+	}
+	_, err := io.WriteString(w, ">")
+	return err
+}
+
+// Render implements markup.Renderer
+func (r Renderer) Render(ctx *markup.RenderContext, input io.Reader, output io.Writer) error {
+	tmpBlock := bufio.NewWriter(output)
+	maxSize := setting.UI.CSV.MaxFileSize
+	maxRows := setting.UI.CSV.MaxRows
+
+	if maxSize != 0 {
+		input = io.LimitReader(input, maxSize+1)
+	}
+
+	rd, err := csv.CreateReaderAndDetermineDelimiter(ctx, input)
+	if err != nil {
+		return err
+	}
+	if _, err := tmpBlock.WriteString(`<table class="data-table">`); err != nil {
+		return err
+	}
+
+	row := 0
 	for {
 		fields, err := rd.Read()
-		if err == io.EOF {
+		if err == io.EOF || (row >= maxRows && maxRows != 0) {
 			break
 		}
 		if err != nil {
 			continue
 		}
-		tmpBlock.WriteString("<tr>")
+
+		if _, err := tmpBlock.WriteString("<tr>"); err != nil {
+			return err
+		}
+		element := "td"
+		if row == 0 {
+			element = "th"
+		}
+		if err := writeField(tmpBlock, element, "line-num", strconv.Itoa(row+1)); err != nil {
+			return err
+		}
 		for _, field := range fields {
-			tmpBlock.WriteString("<td>")
-			tmpBlock.WriteString(html.EscapeString(field))
-			tmpBlock.WriteString("</td>")
-		}
-		tmpBlock.WriteString("</tr>")
-	}
-	tmpBlock.WriteString("</table>")
-
-	return tmpBlock.Bytes()
-}
-
-// bestDelimiter scores the input CSV data against delimiters, and returns the best match.
-// Reads at most 10k bytes & 10 lines.
-func (p Parser) bestDelimiter(data []byte) rune {
-	maxLines := 10
-	maxBytes := util.Min(len(data), 1e4)
-	text := string(data[:maxBytes])
-	text = quoteRegexp.ReplaceAllLiteralString(text, "")
-	lines := strings.SplitN(text, "\n", maxLines+1)
-	lines = lines[:util.Min(maxLines, len(lines))]
-
-	delimiters := []rune{',', ';', '\t', '|'}
-	bestDelim := delimiters[0]
-	bestScore := 0.0
-	for _, delim := range delimiters {
-		score := p.scoreDelimiter(lines, delim)
-		if score > bestScore {
-			bestScore = score
-			bestDelim = delim
-		}
-	}
-
-	return bestDelim
-}
-
-// scoreDelimiter uses a count & regularity metric to evaluate a delimiter against lines of CSV
-func (Parser) scoreDelimiter(lines []string, delim rune) (score float64) {
-	countTotal := 0
-	countLineMax := 0
-	linesNotEqual := 0
-
-	for _, line := range lines {
-		if len(line) == 0 {
-			continue
-		}
-
-		countLine := strings.Count(line, string(delim))
-		countTotal += countLine
-		if countLine != countLineMax {
-			if countLineMax != 0 {
-				linesNotEqual++
+			if err := writeField(tmpBlock, element, "", field); err != nil {
+				return err
 			}
-			countLineMax = util.Max(countLine, countLineMax)
+		}
+		if _, err := tmpBlock.WriteString("</tr>"); err != nil {
+			return err
+		}
+
+		row++
+	}
+
+	if _, err = tmpBlock.WriteString("</table>"); err != nil {
+		return err
+	}
+
+	// Check if maxRows or maxSize is reached, and if true, warn.
+	if (row >= maxRows && maxRows != 0) || (rd.InputOffset() >= maxSize && maxSize != 0) {
+		warn := `<table class="data-table"><tr><td>`
+		rawLink := ` <a href="` + ctx.RenderHelper.ResolveLink(util.PathEscapeSegments(ctx.RenderOptions.RelativePath), markup.LinkTypeRaw) + `">`
+
+		// Try to get the user translation
+		if locale, ok := ctx.Value(translation.ContextKey).(translation.Locale); ok {
+			warn += locale.TrString("repo.file_too_large")
+			rawLink += locale.TrString("repo.file_view_raw")
+		} else {
+			warn += "The file is too large to be shown."
+			rawLink += "View Raw"
+		}
+
+		warn += rawLink + `</a></td></tr></table>`
+
+		// Write the HTML string to the output
+		if _, err := tmpBlock.WriteString(warn); err != nil {
+			return err
 		}
 	}
 
-	return float64(countTotal) * (1 - float64(linesNotEqual)/float64(len(lines)))
+	return tmpBlock.Flush()
 }
